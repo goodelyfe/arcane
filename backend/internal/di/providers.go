@@ -33,6 +33,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/registry"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/role"
 	s3domain "github.com/getarcaneapp/arcane/backend/v2/internal/s3"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/system"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/template"
@@ -264,9 +265,16 @@ func provideProjectServiceInternal(
 	localKv *kv.KVService,
 	localRegistry *registry.ContainerRegistryService,
 	localEnvironment *environment.EnvironmentService,
+	secretSources *secretsource.SecretSourceService,
 	cfg *config.Config,
 ) *project.ProjectService {
-	return project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
+	service := project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
+	service.SetSecretEnvResolver(secretSources)
+	return service
+}
+
+func provideSecretSourceModuleInternal(service *secretsource.SecretSourceService, projectService *project.ProjectService) *secretsource.Module {
+	return secretsource.New(service, projectService.SecretProjectRef)
 }
 
 // updaterServiceParams includes actor registration and worker lifecycle dependencies.

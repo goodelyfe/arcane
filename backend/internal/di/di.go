@@ -35,6 +35,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/project"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/role"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/search"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/session"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/swarm"
@@ -97,6 +98,7 @@ var ServiceOptions = fx.Options(
 		diagnostics.NewDiagnosticsService,
 		gitops.NewGitOpsSyncService,
 		variable.NewVariableService,
+		secretsource.NewSecretSourceService,
 		backup.NewRecoveryKeyStore,
 		upload.NewUploadService,
 		auth.NewAuthService,
@@ -154,6 +156,7 @@ var ServiceOptions = fx.Options(
 		provideSettingsModuleInternal,
 		provideS3ModuleInternal,
 		provideContainerRegistryModuleInternal,
+		provideSecretSourceModuleInternal,
 		provideAuthModuleInternal,
 		provideUserModuleInternal,
 	),

@@ -137,6 +137,7 @@ var accessSurfacesInternal = []AccessSurface{
 	customizeCategorySurfaceInternal("registries", "/customize/registries", "Container Registries", []string{PermCustomizeManage, PermRegistriesList, PermRegistriesRead}),
 	customizeCategorySurfaceInternal("variables", "/customize/variables", "Variables", []string{PermVariablesRead}),
 	customizeCategorySurfaceInternal("git-repositories", "/customize/git-repositories", "Git Repositories", []string{PermCustomizeManage, PermGitReposList, PermGitReposRead}),
+	customizeCategorySurfaceInternal("secret-sources", "/customize/secret-sources", "Secret Sources", []string{PermSecretSourcesList, PermSecretSourcesRead}),
 }
 
 var accessSurfacesByIDInternal = buildAccessSurfaceIndexInternal(accessSurfacesInternal)

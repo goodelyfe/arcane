@@ -47,6 +47,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/role"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/s3"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/search"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/swarm"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/system"
@@ -280,6 +281,7 @@ type HandlerDeps struct {
 	Dashboard         *dashboard.Module
 	Role              *role.Module
 	Variable          *variable.Module
+	SecretSource      *secretsource.Module
 	Upload            *upload.Module
 }
 
@@ -419,6 +421,7 @@ func registerHandlersInternal(api huma.API, deps HandlerDeps, handlerAppCtx hand
 	deps.ContainerRegistry.RegisterRoutes(api)
 	deps.Template.RegisterRoutes(api)
 	deps.Variable.RegisterRoutes(api, cfg)
+	deps.SecretSource.RegisterRoutes(api, cfg)
 	deps.Image.RegisterRoutes(api, handlerAppCtx)
 	deps.Upload.RegisterRoutes(api)
 	build.RegisterBuildWorkspaces(api, deps.Build, deps.Upload.Service())
