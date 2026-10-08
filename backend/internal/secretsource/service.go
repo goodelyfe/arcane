@@ -423,7 +423,7 @@ func (s *SecretSourceService) CheckBinding(ctx context.Context, project ProjectR
 	if err != nil {
 		return secretsourcetypes.CheckResult{}, err
 	}
-	values, invalid, err := s.fetchInternal(ctx, binding, project, actor, "check")
+	values, invalid, err := s.fetchInternal(ctx, binding, project, actor, "check", false)
 	if err != nil {
 		return secretsourcetypes.CheckResult{}, err
 	}
@@ -459,7 +459,7 @@ func (s *SecretSourceService) ResolveDeployEnv(ctx context.Context, project Proj
 		return DeployEnv{}, nil
 	}
 
-	values, _, err := s.fetchInternal(ctx, binding, project, actor, "deploy")
+	values, _, err := s.fetchInternal(ctx, binding, project, actor, "deploy", binding.Required)
 	if err != nil {
 		if binding.Required {
 			return DeployEnv{}, err
@@ -484,13 +484,16 @@ func (s *SecretSourceService) RecordDeployed(ctx context.Context, projectID, has
 
 // fetchInternal reads the binding's secrets, drops keys that are not valid
 // environment variable names, records the outcome on the binding, and logs an
-// event without any secret values.
+// event without any secret values. With requireKeys, an empty result is a
+// failure: a required binding that delivers nothing is almost always pointed at
+// the wrong environment or path.
 func (s *SecretSourceService) fetchInternal(
 	ctx context.Context,
 	binding *ProjectSecretBinding,
 	project ProjectRef,
 	actor usertypes.Actor,
 	reason string,
+	requireKeys bool,
 ) (values map[string]string, invalid []string, err error) {
 	client, source, err := s.clientForSourceInternal(binding.Source)
 	if err == nil {
@@ -503,6 +506,20 @@ func (s *SecretSourceService) fetchInternal(
 			ExpandSecretReferences: binding.ExpandReferences,
 		})
 		cancel()
+	}
+
+	if err == nil {
+		for key := range values {
+			if !envKeyPattern.MatchString(key) {
+				invalid = append(invalid, key)
+				delete(values, key)
+			}
+		}
+		slices.Sort(invalid)
+		if requireKeys && len(values) == 0 {
+			err = fmt.Errorf("infisical returned no usable secrets for environment %q, path %q; check the binding or turn off Required",
+				binding.Environment, binding.SecretPath)
+		}
 	}
 
 	now := time.Now()
@@ -523,14 +540,6 @@ func (s *SecretSourceService) fetchInternal(
 		s.logEventInternal(ctx, event.EventTypeProjectSecretsError, project, actor, metadata)
 		return nil, nil, common.Classify(common.ErrSecretFetchFailed, fmt.Errorf("failed to fetch secrets for project %q: %w", project.Name, err))
 	}
-
-	for key := range values {
-		if !envKeyPattern.MatchString(key) {
-			invalid = append(invalid, key)
-			delete(values, key)
-		}
-	}
-	slices.Sort(invalid)
 
 	s.updateFetchStatusInternal(ctx, binding.ID, now, nil)
 	metadata["keyCount"] = len(values)

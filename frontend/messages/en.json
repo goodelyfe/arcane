@@ -3973,5 +3973,8 @@
 	"project_secrets_last_fetch_error": "Last fetch failed",
 	"project_secrets_last_fetched": "Last fetched {time}",
 	"project_secrets_never_fetched": "Not fetched yet",
-	"project_secrets_local_only": "Secret sources are currently supported on the local environment only."
+	"project_secrets_local_only": "Secret sources are currently supported on the local environment only.",
+	"project_secrets_empty_title": "No secrets found",
+	"project_secrets_empty_required": "Infisical returned no usable secrets for this environment and path. Deploys will fail while Required is on, so check the environment and path.",
+	"project_secrets_empty_optional": "Infisical returned no usable secrets for this environment and path. Deploys will continue without them."
 }

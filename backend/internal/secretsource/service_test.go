@@ -293,3 +293,28 @@ func TestUpdateSourceKeepsTestResultUnlessConnectionChanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, stored.LastTestedAt)
 }
+
+func TestResolveDeployEnvEmptyResultFailsOnlyWhenRequired(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	fake := &fakeInfisicalInternal{}
+	// Only an invalid key: nothing usable is delivered.
+	fake.setSecrets(`{"secrets":[{"secretKey":"bad-key","secretValue":"x"}]}`)
+	source := createTestSourceInternal(t, service, fake.server(t).URL)
+	project := ProjectRef{ID: "project-1", Name: "billing-api"}
+
+	bindTestProjectInternal(t, service, source.ID, true)
+	_, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
+	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
+	assert.Contains(t, err.Error(), "no usable secrets")
+
+	// Check still succeeds so the UI can show what came back.
+	result, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Keys)
+	assert.Equal(t, []string{"bad-key"}, result.InvalidKeys)
+
+	bindTestProjectInternal(t, service, source.ID, false)
+	env, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	assert.Empty(t, env.Values)
+}
