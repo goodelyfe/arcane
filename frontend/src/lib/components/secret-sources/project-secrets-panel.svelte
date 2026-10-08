@@ -356,6 +356,15 @@
 			</div>
 		{/if}
 
+		{#if result.keys.length === 0}
+			<Alert.Root
+				variant="destructive-subtle"
+				icon={AlertIcon}
+				heading={m.project_secrets_empty_title()}
+				description={binding?.required ? m.project_secrets_empty_required() : m.project_secrets_empty_optional()}
+			/>
+		{/if}
+
 		{#if result.overriddenKeys.length > 0}
 			<Alert.Root
 				variant="warning-subtle"
