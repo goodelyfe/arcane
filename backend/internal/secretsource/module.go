@@ -1,5 +1,6 @@
-// Package secretsource owns connections to external secret managers
-// (Infisical), project secret bindings, and the deploy-time secret fetch.
+// Package secretsource owns connections to external secret providers
+// (Infisical, Bitwarden/Vaultwarden), project secret bindings, the deploy-time
+// secret fetch, and background drift checks.
 package secretsource
 
 import (
@@ -61,7 +62,7 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 		Method:      "POST",
 		Path:        "/secret-sources",
 		Summary:     "Create a secret source",
-		Description: "Save a connection to an Infisical instance using a Universal Auth machine identity",
+		Description: "Save a connection to a secret provider: Infisical (Universal Auth) or Bitwarden/Vaultwarden (through bw serve)",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
 	}, authz.PermSecretSourcesCreate, h.CreateSource)
@@ -106,24 +107,14 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 	}, authz.PermSecretSourcesDelete, h.DeleteSource)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
-		OperationID: "listSecretSourceProjects",
+		OperationID: "browseSecretSource",
 		Method:      "GET",
-		Path:        "/secret-sources/{id}/projects",
-		Summary:     "List projects in the secret manager",
-		Description: "List the projects and environments the source's identity can access",
+		Path:        "/secret-sources/{id}/browse",
+		Summary:     "Browse a secret source",
+		Description: "List pickable binding targets, such as Infisical projects and folders or Bitwarden folders, collections, and items",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermSecretSourcesRead, h.ListRemoteProjects)
-
-	middleware.RegisterWithPermission(api, huma.Operation{
-		OperationID: "listSecretSourceFolders",
-		Method:      "GET",
-		Path:        "/secret-sources/{id}/folders",
-		Summary:     "List folders in the secret manager",
-		Description: "List the folders directly under a path of one project environment",
-		Tags:        tags,
-		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermSecretSourcesRead, h.ListRemoteFolders)
+	}, authz.PermSecretSourcesRead, h.Browse)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
 		OperationID: "getProjectSecretBinding",
