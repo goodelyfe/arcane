@@ -158,6 +158,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	if err != nil {
 		return nil, err
 	}
+	before := *source
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -193,9 +194,15 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	if req.OrganizationSlug != nil {
 		source.OrganizationSlug = strings.TrimSpace(*req.OrganizationSlug)
 	}
-	// Connection settings changed, so the previous test result no longer applies.
-	source.LastTestedAt = nil
-	source.LastTestError = nil
+	// A test result only describes the connection it was run against.
+	connectionChanged := source.SiteURL != before.SiteURL ||
+		source.ClientID != before.ClientID ||
+		source.ClientSecret != before.ClientSecret ||
+		source.OrganizationSlug != before.OrganizationSlug
+	if connectionChanged {
+		source.LastTestedAt = nil
+		source.LastTestError = nil
+	}
 
 	if saveErr := s.db.WithContext(ctx).Save(source).Error; saveErr != nil {
 		return nil, fmt.Errorf("failed to update secret source: %w", saveErr)
@@ -234,25 +241,29 @@ func (s *SecretSourceService) TestSource(ctx context.Context, req secretsourcety
 		OrganizationSlug: req.OrganizationSlug,
 	}
 
-	var stored *SecretSource
+	// Record the result on the source only when the tested settings are the
+	// ones it stores, so an unsaved edit never overwrites the saved status.
+	recordOn := ""
 	if req.SourceID != "" {
 		source, err := s.loadSourceInternal(ctx, req.SourceID)
 		if err != nil {
 			return secretsourcetypes.TestSourceResult{}, err
 		}
-		stored = source
+		storedSecret, decryptErr := crypto.Decrypt(source.ClientSecret)
+		if decryptErr != nil {
+			return secretsourcetypes.TestSourceResult{}, fmt.Errorf("failed to decrypt stored client secret: %w", decryptErr)
+		}
 		if cfg.ClientSecret == "" {
-			secret, decryptErr := crypto.Decrypt(source.ClientSecret)
-			if decryptErr != nil {
-				return secretsourcetypes.TestSourceResult{}, fmt.Errorf("failed to decrypt stored client secret: %w", decryptErr)
-			}
-			cfg.ClientSecret = secret
+			cfg.ClientSecret = storedSecret
+		}
+		if cfg.ClientSecret == storedSecret && sameConnectionInternal(source, cfg) {
+			recordOn = source.ID
 		}
 	}
 
 	result := s.runTestInternal(ctx, cfg)
-	if stored != nil && req.ClientSecret == "" && sameConnectionInternal(stored, cfg) {
-		s.recordTestInternal(ctx, stored.ID, result)
+	if recordOn != "" {
+		s.recordTestInternal(ctx, recordOn, result)
 	}
 	return result, nil
 }
