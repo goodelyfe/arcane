@@ -15,7 +15,6 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/common"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/setupplan"
-	infisicalclient "github.com/getarcaneapp/arcane/backend/v2/pkg/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
 
@@ -76,8 +75,9 @@ func (s *SecretSourceService) SetProjectFileAccess(files ProjectFileAccess) {
 
 // setupContextInternal is the state shared by plan and apply.
 type setupContextInternal struct {
-	source    *SecretSource
-	setup     *infisical.Setup
+	source *SecretSource
+	// writer is nil when the source cannot write.
+	writer    setupWriterInternal
 	variables []secretsourcetypes.SetupVariable
 	envValues map[string]string
 	files     ProjectFiles
@@ -91,8 +91,9 @@ func (s *SecretSourceService) loadSetupContextInternal(ctx context.Context, proj
 	if err != nil {
 		return nil, err
 	}
-	if source.Provider != secretsourcetypes.ProviderInfisical || source.Settings.Infisical == nil {
-		return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("project setup is available for Infisical sources"))
+	writer, err := newSetupWriterInternal(s.httpClient, source)
+	if err != nil {
+		return nil, err
 	}
 
 	files, err := s.projectFiles.SecretSetupFiles(ctx, project.ID)
@@ -119,25 +120,11 @@ func (s *SecretSourceService) loadSetupContextInternal(ctx context.Context, proj
 	if err != nil {
 		return nil, common.Classify(common.ErrValidation, err)
 	}
-
-	setupCtx := &setupContextInternal{source: source, variables: variables, envValues: envValues, files: files}
-	setupSecret, err := decryptCredentialInternal(source.SetupCredential)
-	if err != nil {
-		return nil, err
-	}
-	setup, err := infisical.NewSetup(s.httpClient, *source.Settings.Infisical, setupSecret)
-	switch {
-	case errors.Is(err, infisical.ErrNoSetupIdentity):
-	case err != nil:
-		return nil, common.Classify(common.ErrSecretSourceInvalid, err)
-	default:
-		setupCtx.setup = setup
-	}
-	return setupCtx, nil
+	return &setupContextInternal{source: source, writer: writer, variables: variables, envValues: envValues, files: files}, nil
 }
 
 // PlanSetup lists the project's variables and, when a target is given, where
-// each stands in Infisical. It writes nothing and returns no values.
+// each stands in the secret manager. It writes nothing and returns no values.
 func (s *SecretSourceService) PlanSetup(ctx context.Context, project ProjectRef, req secretsourcetypes.SetupPlanRequest) (secretsourcetypes.SetupPlan, error) {
 	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
 	defer cancel()
@@ -152,39 +139,49 @@ func (s *SecretSourceService) PlanSetup(ctx context.Context, project ProjectRef,
 	}
 
 	plan := secretsourcetypes.SetupPlan{
+		Provider:             setupCtx.source.Provider,
 		SuggestedProjectName: project.Name,
 		SuggestedSecretPath:  infisical.SuggestFolder(project.Name),
-		CanWrite:             setupCtx.setup != nil,
+		SuggestedFolderName:  project.Name,
+		CanWrite:             setupCtx.writer != nil,
 		Variables:            setupCtx.variables,
 		HasGitSource:         setupCtx.files.HasGitSource,
 		AlreadyBound:         existing != nil,
 	}
-	if setupCtx.setup == nil {
+	writer := setupCtx.writer
+	if writer == nil {
 		return plan, nil
 	}
 
-	if identity, identityErr := setupCtx.setup.FindDeployIdentity(ctx); identityErr != nil {
-		plan.DeployIdentityError = identityErr.Error()
-	} else if identity == nil {
-		plan.DeployIdentityError = deployIdentityNotFound
-	} else {
-		plan.DeployIdentity = identity
+	if setupCtx.source.Provider == secretsourcetypes.ProviderInfisical {
+		if identity, identityErr := writer.DeployIdentity(ctx); identityErr != nil {
+			plan.DeployIdentityError = identityErr.Error()
+		} else if identity == nil {
+			plan.DeployIdentityError = deployIdentityNotFound
+		} else {
+			plan.DeployIdentity = identity
+		}
 	}
 
 	if strings.TrimSpace(req.Target.Mode) == "" {
 		return plan, nil
 	}
-	target, err := infisical.NormalizeSetupTarget(req.Target, project.Name)
+	target, err := writer.NormalizeTarget(req.Target, project.Name)
 	if err != nil {
 		plan.RemoteError = err.Error()
 		return plan, nil
 	}
-	if target.Mode == secretsourcetypes.SetupModeNewProject {
-		if taken, takenErr := setupCtx.setup.ProjectNameTaken(ctx, target.ProjectName); takenErr == nil {
+	if writer.CreatesContainer(target) {
+		if taken, takenErr := writer.NameTaken(ctx, target); takenErr == nil {
 			plan.ProjectNameTaken = taken
 		}
+		// Nothing exists there yet.
+		for i := range plan.Variables {
+			plan.Variables[i].Remote = secretsourcetypes.SetupRemoteMissing
+		}
+		return plan, nil
 	}
-	remote, err := setupCtx.setup.RemoteValues(ctx, target)
+	remote, err := writer.RemoteValues(ctx, target)
 	if err != nil {
 		plan.RemoteError = err.Error()
 		return plan, nil
@@ -210,10 +207,10 @@ func remoteStateInternal(variable secretsourcetypes.SetupVariable, local, remote
 	}
 }
 
-// ApplySetup creates the Infisical side of a project and binds it, step by
-// step. It stops at the first step that leaves nothing useful to continue
-// with. The .env is only edited after the deploy identity reads every moved
-// value back unchanged.
+// ApplySetup creates the secret manager's side of a project and binds it,
+// step by step. It stops at the first step that leaves nothing useful to
+// continue with. The .env is only edited after a deploy-style read returns
+// every moved value unchanged.
 func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef, req secretsourcetypes.SetupApplyRequest, actor usertypes.Actor) (secretsourcetypes.SetupResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, setupTimeout)
 	defer cancel()
@@ -222,94 +219,72 @@ func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef
 	if err != nil {
 		return secretsourcetypes.SetupResult{}, err
 	}
-	if setupCtx.setup == nil {
+	writer := setupCtx.writer
+	if writer == nil {
 		return secretsourcetypes.SetupResult{}, common.Classify(common.ErrSecretSourceInvalid, infisical.ErrNoSetupIdentity)
 	}
-	target, keys, err := validateApplyInternal(req, project.Name)
+	target, keys, err := validateApplyInternal(writer, req, project.Name)
 	if err != nil {
 		return secretsourcetypes.SetupResult{}, common.Classify(common.ErrValidation, err)
 	}
 
-	run := &setupRunInternal{}
-	setup := setupCtx.setup
-
-	// A second project with the same name is almost always a re-run after a
-	// failed step; use the existing one instead.
-	if target.Mode == secretsourcetypes.SetupModeNewProject {
-		taken, takenErr := setup.ProjectNameTaken(ctx, target.ProjectName)
+	// A second project or folder with the same name is almost always a re-run
+	// after a failed step; use the existing one instead.
+	if writer.CreatesContainer(target) {
+		taken, takenErr := writer.NameTaken(ctx, target)
 		if takenErr != nil {
-			return secretsourcetypes.SetupResult{}, common.Classify(common.ErrUnavailable,
-				fmt.Errorf("could not check for an existing project named %q: %w", target.ProjectName, takenErr))
+			return secretsourcetypes.SetupResult{}, common.Classify(common.ErrUnavailable, fmt.Errorf("could not check for an existing project or folder: %w", takenErr))
 		}
 		if taken {
 			return secretsourcetypes.SetupResult{}, common.Classify(common.ErrConflict,
-				fmt.Errorf("an Infisical project named %q already exists; choose Existing project to use it", target.ProjectName))
+				errors.New("a project or folder with this name already exists; choose the existing one instead"))
 		}
 	}
 
-	// 1. Project.
-	projectID := target.ProjectID
-	if target.Mode == secretsourcetypes.SetupModeNewProject {
-		projectID, err = setup.CreateProject(ctx, target.ProjectName, target.Environment)
-		if err != nil {
-			return run.failInternal(setupStepProject, err), nil
-		}
-		run.addInternal(setupStepProject, secretsourcetypes.SetupStepDone, fmt.Sprintf("Created project %q (ID %s)", target.ProjectName, projectID))
-		target.ProjectID = projectID
-	} else {
-		run.addInternal(setupStepProject, secretsourcetypes.SetupStepSkipped, "Using the existing project")
-	}
+	run := &setupRunInternal{}
 
-	// 2. Folder.
-	if target.SecretPath == "/" {
-		run.addInternal(setupStepFolder, secretsourcetypes.SetupStepSkipped, "Using the root path")
-	} else {
-		created, folderErr := setup.EnsurePath(ctx, projectID, target.Environment, target.SecretPath)
-		if folderErr != nil {
-			return run.failInternal(setupStepFolder, folderErr), nil
-		}
-		if len(created) == 0 {
-			run.addInternal(setupStepFolder, secretsourcetypes.SetupStepSkipped, target.SecretPath+" already exists")
-		} else {
-			run.addInternal(setupStepFolder, secretsourcetypes.SetupStepDone, "Created "+strings.Join(created, ", "))
-		}
-	}
-
-	// 3. Secrets.
-	remote, err := setup.RemoteValues(ctx, target)
+	// 1. Project and folder.
+	target, steps, err := writer.Prepare(ctx, target)
+	run.result.Steps = append(run.result.Steps, steps...)
 	if err != nil {
-		return run.failInternal(setupStepSecrets, err), nil
+		step := setupStepProject
+		if stepErr, ok := errors.AsType[stepErrorInternal](err); ok {
+			step = stepErr.step
+		}
+		return run.failInternal(step, err), nil
+	}
+
+	// 2. Secrets.
+	remote := map[string]string{}
+	if !writer.CreatesContainer(target) {
+		if remote, err = writer.RemoteValues(ctx, target); err != nil {
+			return run.failInternal(setupStepSecrets, err), nil
+		}
 	}
 	plan := planWritesInternal(keys, req, setupCtx.envValues, remote)
-	pending, err := setup.WriteSecrets(ctx, projectID, target.Environment, target.SecretPath, plan.create, plan.overwrite)
+	pending, err := writer.Write(ctx, target, plan.values, plan.create, plan.overwrite)
 	if err != nil {
 		return run.failInternal(setupStepSecrets, err), nil
 	}
 	secretsDetail := fmt.Sprintf("Created %d, replaced %d, kept %d existing", len(plan.create), len(plan.overwrite), len(plan.kept))
 	if pending {
-		run.addInternal(setupStepSecrets, secretsourcetypes.SetupStepPending, secretsDetail+"; an Infisical approval policy holds the change until it is approved")
+		run.addInternal(setupStepSecrets, secretsourcetypes.SetupStepPending, secretsDetail+"; an approval policy holds the change until it is approved")
 	} else {
 		run.addInternal(setupStepSecrets, secretsourcetypes.SetupStepDone, secretsDetail)
 	}
 
-	// 4. Deploy identity access.
-	if !req.GrantDeployIdentity {
-		run.addInternal(setupStepGrant, secretsourcetypes.SetupStepSkipped, "Not requested")
+	// 3. Read access for deploys.
+	if req.GrantDeployIdentity {
+		run.addResultInternal(setupStepGrant, writer.Grant(ctx, target))
 	} else {
-		run.addResultInternal(setupStepGrant, s.grantDeployIdentityInternal(ctx, setup, projectID))
+		run.addInternal(setupStepGrant, secretsourcetypes.SetupStepSkipped, "Not requested")
 	}
 
-	// 5. Binding. It starts optional so a failed verification cannot block
-	// deploys, and becomes required once the deploy identity reads it.
+	// 4. Binding. It starts optional so a failed verification cannot block
+	// deploys, and becomes required once a deploy-style read works.
 	bindingRequest := secretsourcetypes.UpsertBindingRequest{
-		SourceID: setupCtx.source.ID,
-		Target: secretsourcetypes.BindingTarget{Infisical: &secretsourcetypes.InfisicalTarget{
-			ProjectID:        projectID,
-			Environment:      target.Environment,
-			SecretPath:       target.SecretPath,
-			IncludeImports:   true,
-			ExpandReferences: true,
-		}},
+		SourceID:     setupCtx.source.ID,
+		Target:       writer.BindingTarget(target),
 		Required:     false,
 		Enabled:      true,
 		AutoRedeploy: req.AutoRedeploy,
@@ -319,9 +294,9 @@ func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef
 		return run.failInternal(setupStepBinding, err), nil
 	}
 	run.result.Binding = binding
-	bindingDetail := "Bound the project to " + infisical.Describe(binding.Target.Infisical)
+	bindingDetail := "Bound the project to " + describeTargetInternal(&ProjectSecretBinding{Target: binding.Target})
 
-	// 6. Verify with the deploy identity.
+	// 5. Verify the way a deploy reads.
 	verified, verifyStep := s.verifySetupInternal(ctx, setupCtx.source, binding.Target, keys, plan, setupCtx.envValues, pending)
 	if req.Required {
 		if verifyStep.Status == secretsourcetypes.SetupStepDone {
@@ -332,13 +307,13 @@ func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef
 			}
 			run.result.Binding = binding
 		} else {
-			bindingDetail += "; left optional until the deploy identity can read the secrets"
+			bindingDetail += "; left optional until deploys can read the secrets"
 		}
 	}
 	run.addInternal(setupStepBinding, secretsourcetypes.SetupStepDone, bindingDetail)
 	run.addResultInternal(setupStepVerify, verifyStep)
 
-	// 7. .env.
+	// 6. .env.
 	run.addResultInternal(setupStepEnvFile, s.cleanEnvFileInternal(ctx, project, req, setupCtx, verified, verifyStep.Status, actor, &run.result))
 
 	run.result.OK = !slices.ContainsFunc(run.result.Steps, func(step secretsourcetypes.SetupStep) bool {
@@ -368,8 +343,8 @@ func (r *setupRunInternal) failInternal(id string, err error) secretsourcetypes.
 }
 
 // validateApplyInternal checks the request before anything is written.
-func validateApplyInternal(req secretsourcetypes.SetupApplyRequest, projectName string) (secretsourcetypes.SetupTarget, []string, error) {
-	target, err := infisical.NormalizeSetupTarget(req.Target, projectName)
+func validateApplyInternal(writer setupWriterInternal, req secretsourcetypes.SetupApplyRequest, projectName string) (secretsourcetypes.SetupTarget, []string, error) {
+	target, err := writer.NormalizeTarget(req.Target, projectName)
 	if err != nil {
 		return target, nil, err
 	}
@@ -406,29 +381,34 @@ func validateApplyInternal(req secretsourcetypes.SetupApplyRequest, projectName 
 }
 
 type writePlanInternal struct {
-	create    []infisicalclient.SecretInput
-	overwrite []infisicalclient.SecretInput
+	// values are what setup writes per key: the .env value, or empty for
+	// placeholders.
+	values    map[string]string
+	create    []string
+	overwrite []string
 	kept      []string
-	// moved are keys whose Infisical value should now equal the .env value.
+	// moved are keys whose secret manager value should now equal the .env
+	// value.
 	moved []string
 }
 
 // planWritesInternal decides per key: create it when missing, replace it when
-// the user chose to overwrite a different value, and otherwise keep
-// Infisical's value. Placeholders never replace anything.
+// the user chose to overwrite a different value, and otherwise keep the
+// existing value. Placeholders never replace anything.
 func planWritesInternal(keys []string, req secretsourcetypes.SetupApplyRequest, local, remote map[string]string) writePlanInternal {
 	importing := req.Values == secretsourcetypes.SetupValuesImport
-	plan := writePlanInternal{}
+	plan := writePlanInternal{values: make(map[string]string, len(keys))}
 	for _, key := range keys {
 		localValue, inLocal := local[key]
 		remoteValue, inRemote := remote[key]
-		value := ""
 		if importing {
-			value = localValue
+			plan.values[key] = localValue
+		} else {
+			plan.values[key] = ""
 		}
 		switch {
 		case !inRemote:
-			plan.create = append(plan.create, infisicalclient.SecretInput{Key: key, Value: value, Comment: "Created by Arcane"})
+			plan.create = append(plan.create, key)
 			if importing && inLocal {
 				plan.moved = append(plan.moved, key)
 			}
@@ -436,7 +416,7 @@ func planWritesInternal(keys []string, req secretsourcetypes.SetupApplyRequest, 
 			plan.kept = append(plan.kept, key)
 			plan.moved = append(plan.moved, key)
 		case importing && inLocal && slices.Contains(req.OverwriteKeys, key):
-			plan.overwrite = append(plan.overwrite, infisicalclient.SecretInput{Key: key, Value: value})
+			plan.overwrite = append(plan.overwrite, key)
 			plan.moved = append(plan.moved, key)
 		default:
 			plan.kept = append(plan.kept, key)
@@ -445,29 +425,7 @@ func planWritesInternal(keys []string, req secretsourcetypes.SetupApplyRequest, 
 	return plan
 }
 
-func (s *SecretSourceService) grantDeployIdentityInternal(ctx context.Context, setup *infisical.Setup, projectID string) secretsourcetypes.SetupStep {
-	identity, err := setup.FindDeployIdentity(ctx)
-	if err != nil {
-		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepFailed, Detail: err.Error()}
-	}
-	if identity == nil {
-		return secretsourcetypes.SetupStep{
-			Status: secretsourcetypes.SetupStepFailed,
-			Detail: "could not find the deploy identity; add it to the Infisical project with the viewer role",
-		}
-	}
-	already, err := setup.GrantDeployIdentity(ctx, projectID, identity.ID)
-	if err != nil {
-		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepFailed, Detail: err.Error()}
-	}
-	if already {
-		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: identity.Name + " already has access"}
-	}
-	return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepDone, Detail: "Gave " + identity.Name + " the " + infisical.DeployRole + " role"}
-}
-
-// verifySetupInternal fetches the new binding with the deploy identity, the
-// way a deploy would. It returns the moved keys whose value came back exactly
+// verifySetupInternal fetches the new binding the way a deploy would. It returns the moved keys whose value came back exactly
 // as in the .env; only those may leave the .env.
 func (s *SecretSourceService) verifySetupInternal(
 	ctx context.Context,
@@ -479,27 +437,39 @@ func (s *SecretSourceService) verifySetupInternal(
 	pending bool,
 ) ([]string, secretsourcetypes.SetupStep) {
 	if pending {
-		return nil, secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: "Waiting for the Infisical approval"}
+		return nil, secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: "Waiting for the approval"}
 	}
 	provider, err := s.providerForSourceInternal(source)
 	if err != nil {
 		return nil, secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepFailed, Detail: err.Error()}
 	}
-	fetched, _, err := provider.Fetch(ctx, target)
+	fetched, skipped, err := provider.Fetch(ctx, target)
 	if err != nil {
-		return nil, secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepFailed, Detail: "the deploy identity could not read the secrets: " + err.Error()}
+		return nil, secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepFailed, Detail: "deploys could not read the secrets: " + err.Error()}
+	}
+
+	// Some providers skip entries without a value (an empty Bitwarden note);
+	// a key written empty and read back as skipped is still in place.
+	readBack := func(key string) (string, bool) {
+		if value, ok := fetched[key]; ok {
+			return value, true
+		}
+		if plan.values[key] == "" && slices.Contains(skipped, key) {
+			return "", true
+		}
+		return "", false
 	}
 
 	missing := []string{}
 	for _, key := range keys {
-		if _, ok := fetched[key]; !ok {
+		if _, ok := readBack(key); !ok {
 			missing = append(missing, key)
 		}
 	}
 	verified := []string{}
 	changed := []string{}
 	for _, key := range plan.moved {
-		if value, ok := fetched[key]; ok && value == local[key] {
+		if value, ok := readBack(key); ok && value == local[key] {
 			verified = append(verified, key)
 		} else if ok {
 			changed = append(changed, key)
@@ -510,18 +480,19 @@ func (s *SecretSourceService) verifySetupInternal(
 	case len(missing) > 0:
 		return verified, secretsourcetypes.SetupStep{
 			Status: secretsourcetypes.SetupStepFailed,
-			Detail: "the deploy identity cannot read " + strings.Join(missing, ", "),
+			Detail: "deploys cannot read " + strings.Join(missing, ", "),
 		}
 	case len(changed) > 0:
 		// Reference expansion or an import can change what a deploy receives.
 		return verified, secretsourcetypes.SetupStep{
 			Status: secretsourcetypes.SetupStepDone,
-			Detail: fmt.Sprintf("The deploy identity reads all %d keys; %s resolve to different values (references or imports), so they stay in the .env", len(keys), strings.Join(changed, ", ")),
+			Detail: fmt.Sprintf("Deploys read all %d keys; %s resolve to different values (references or imports), so they stay in the .env",
+				len(keys), strings.Join(changed, ", ")),
 		}
 	default:
 		return verified, secretsourcetypes.SetupStep{
 			Status: secretsourcetypes.SetupStepDone,
-			Detail: fmt.Sprintf("The deploy identity reads all %d keys", len(keys)),
+			Detail: fmt.Sprintf("Deploys read all %d keys", len(keys)),
 		}
 	}
 }
@@ -537,7 +508,7 @@ func (s *SecretSourceService) cleanEnvFileInternal(
 	result *secretsourcetypes.SetupResult,
 ) secretsourcetypes.SetupStep {
 	if req.EnvFile != secretsourcetypes.SetupEnvFileRemove {
-		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: "The .env was left as is; Infisical values take precedence at deploy"}
+		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: "The .env was left as is; secret manager values take precedence at deploy"}
 	}
 	if verifyStatus != secretsourcetypes.SetupStepDone {
 		return secretsourcetypes.SetupStep{Status: secretsourcetypes.SetupStepSkipped, Detail: "Nothing was removed because verification did not pass"}
@@ -567,7 +538,7 @@ func (s *SecretSourceService) cleanEnvFileInternal(
 	if err != nil {
 		return secretsourcetypes.SetupStep{
 			Status: secretsourcetypes.SetupStepFailed,
-			Detail: "the secrets are in Infisical, but the .env could not be updated: " + err.Error(),
+			Detail: "the secrets are stored, but the .env could not be updated: " + err.Error(),
 		}
 	}
 	result.RemovedKeys = removal.Removed
