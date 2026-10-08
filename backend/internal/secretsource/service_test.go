@@ -262,3 +262,34 @@ func TestTestSourceUsesStoredSecretAndRecordsResult(t *testing.T) {
 	require.NotNil(t, stored.LastTestedAt)
 	assert.Nil(t, stored.LastTestError)
 }
+
+func TestUpdateSourceKeepsTestResultUnlessConnectionChanges(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	server := (&fakeInfisicalInternal{}).server(t)
+	source := createTestSourceInternal(t, service, server.URL)
+
+	// Testing with the stored settings, secret included, records the result.
+	_, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
+		SourceID: source.ID, SiteURL: server.URL, ClientID: "client-id", ClientSecret: "client-secret",
+	})
+	require.NoError(t, err)
+
+	newName := "Renamed"
+	updated, err := service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Name: &newName})
+	require.NoError(t, err)
+	require.NotNil(t, updated.LastTestedAt, "a rename must keep the test result")
+
+	newClientID := "other-client"
+	updated, err = service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{ClientID: &newClientID})
+	require.NoError(t, err)
+	assert.Nil(t, updated.LastTestedAt, "changing the connection must clear the test result")
+
+	// Testing unsaved settings must not overwrite the stored status.
+	_, err = service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
+		SourceID: source.ID, SiteURL: server.URL, ClientID: "unsaved-client",
+	})
+	require.NoError(t, err)
+	stored, err := service.GetSource(t.Context(), source.ID)
+	require.NoError(t, err)
+	assert.Nil(t, stored.LastTestedAt)
+}

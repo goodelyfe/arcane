@@ -7,7 +7,7 @@
 	import IfPermitted from '#lib/components/if-permitted.svelte';
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
-	import { EditIcon, GlobeIcon, LockIcon, ClockIcon } from '#lib/icons/index.js';
+	import { EditIcon, GlobeIcon, LockIcon, ClockIcon, TestIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import type { SecretSource } from '#lib/types/secret-source.js';
 	import type { Paginated, SearchPaginationSortRequest } from '#lib/types/shared.js';
@@ -16,11 +16,13 @@
 	let {
 		sources,
 		onEdit,
-		onDelete
+		onDelete,
+		onTest
 	}: {
 		sources: SecretSource[];
 		onEdit: (source: SecretSource) => void;
 		onDelete: (source: SecretSource) => void;
+		onTest: (source: SecretSource) => void;
 	} = $props();
 
 	let requestOptions = $state<SearchPaginationSortRequest>({ pagination: { page: 1, limit: 20 } });
@@ -133,6 +135,12 @@
 
 {#snippet RowActions({ item }: { item: SecretSource })}
 	<RowActionsMenu>
+		<IfPermitted perm="secret-sources:test">
+			<DropdownMenu.Item onclick={() => onTest(item)}>
+				<TestIcon class="size-4" />
+				{m.test_connection()}
+			</DropdownMenu.Item>
+		</IfPermitted>
 		<IfPermitted perm="secret-sources:update">
 			<DropdownMenu.Item onclick={() => onEdit(item)}>
 				<EditIcon class="size-4" />
