@@ -31,7 +31,7 @@
 	const filteredSources = $derived.by(() => {
 		const query = (requestOptions.search ?? '').trim().toLowerCase();
 		const list = query
-			? sources.filter((source) => source.name.toLowerCase().includes(query) || source.siteUrl.toLowerCase().includes(query))
+			? sources.filter((source) => source.name.toLowerCase().includes(query) || endpointOf(source).toLowerCase().includes(query))
 			: [...sources];
 		if (requestOptions.sort?.column === 'name') {
 			list.sort((a, b) => a.name.localeCompare(b.name));
@@ -50,6 +50,16 @@
 		}
 	});
 
+	// Where Arcane connects for this source. An empty Infisical site URL means Infisical Cloud.
+	function endpointOf(source: SecretSource): string {
+		if (source.provider === 'bitwarden') return source.settings.bitwarden?.serveUrl ?? '';
+		return source.settings.infisical?.siteUrl || 'https://app.infisical.com';
+	}
+
+	function providerLabel(source: SecretSource): string {
+		return source.provider === 'bitwarden' ? m.secret_sources_provider_bitwarden() : m.secret_sources_provider_infisical();
+	}
+
 	function testLabel(source: SecretSource): string {
 		if (!source.lastTestedAt) return m.secret_sources_never_tested();
 		return m.secret_sources_last_tested({ time: formatRelativeTime(source.lastTestedAt) });
@@ -57,13 +67,13 @@
 
 	const columns = [
 		{ accessorKey: 'name', title: m.common_name(), sortable: true, cell: NameCell },
-		{ accessorKey: 'siteUrl', title: m.secret_sources_site_url(), cell: SiteCell },
+		{ id: 'endpoint', accessorFn: (source) => endpointOf(source), title: m.secret_sources_endpoint(), cell: SiteCell },
 		{ accessorKey: 'bindingCount', title: m.projects_title(), cell: UsageCell },
 		{ accessorKey: 'lastTestedAt', title: m.common_status(), cell: StatusCell }
 	] satisfies ColumnSpec<SecretSource>[];
 
 	const mobileFields = [
-		{ id: 'siteUrl', label: m.secret_sources_site_url(), defaultVisible: true },
+		{ id: 'endpoint', label: m.secret_sources_endpoint(), defaultVisible: true },
 		{ id: 'lastTestedAt', label: m.common_status(), defaultVisible: true }
 	];
 </script>
@@ -85,12 +95,12 @@
 {#snippet NameCell({ item }: { item: SecretSource })}
 	<div class="flex items-center gap-2">
 		<span class="font-medium">{item.name}</span>
-		<Badge variant="violet" size="sm">{m.secret_sources_provider_infisical()}</Badge>
+		<Badge variant={item.provider === 'bitwarden' ? 'blue' : 'violet'} size="sm">{providerLabel(item)}</Badge>
 	</div>
 {/snippet}
 
 {#snippet SiteCell({ item }: { item: SecretSource })}
-	<span class="max-w-70 truncate font-mono text-sm text-muted-foreground">{item.siteUrl}</span>
+	<span class="max-w-70 truncate font-mono text-sm text-muted-foreground">{endpointOf(item)}</span>
 {/snippet}
 
 {#snippet UsageCell({ item }: { item: SecretSource })}
@@ -115,11 +125,11 @@
 		badges={item.lastTestError ? [{ variant: 'red' as const, text: m.secret_sources_test_failed() }] : []}
 		fields={[
 			{
-				label: m.secret_sources_site_url(),
-				getValue: (item: SecretSource) => item.siteUrl,
+				label: m.secret_sources_endpoint(),
+				getValue: (item: SecretSource) => endpointOf(item),
 				icon: GlobeIcon,
 				iconVariant: 'gray' as const,
-				show: mobileFieldVisibility['siteUrl'] ?? true
+				show: mobileFieldVisibility['endpoint'] ?? true
 			},
 			{
 				label: m.common_status(),

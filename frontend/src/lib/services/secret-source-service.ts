@@ -2,7 +2,8 @@ import type {
 	ProjectSecretBinding,
 	ProjectSecretBindingDto,
 	ProjectSecretCheckResult,
-	RemoteSecretProject,
+	SecretBrowseItem,
+	SecretBrowseQuery,
 	SecretSource,
 	SecretSourceCreateDto,
 	SecretSourceTestDto,
@@ -34,15 +35,14 @@ class SecretSourceService extends BaseAPIService {
 		return this.handleResponse(this.api.post('/secret-sources/test', dto));
 	}
 
-	async listRemoteProjects(id: string): Promise<RemoteSecretProject[]> {
-		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/projects`);
-		return response.data?.data ?? [];
-	}
-
-	async listRemoteFolders(id: string, projectId: string, environment: string, path: string): Promise<string[]> {
-		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/folders`, {
-			params: { projectId, environment, path }
-		});
+	async browse(id: string, query: SecretBrowseQuery): Promise<SecretBrowseItem[]> {
+		const params = {
+			kind: query.kind,
+			projectId: query.projectId || undefined,
+			environment: query.environment || undefined,
+			path: query.path || undefined
+		};
+		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/browse`, { params });
 		return response.data?.data ?? [];
 	}
 

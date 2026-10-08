@@ -97,9 +97,8 @@ export const queryKeys = {
 	secretSources: {
 		all: ['secret-sources'] as const,
 		list: () => ['secret-sources', 'list'] as const,
-		remoteProjects: (sourceId: string) => ['secret-sources', 'remote-projects', sourceId] as const,
-		remoteFolders: (sourceId: string, projectId: string, environment: string, path: string) =>
-			['secret-sources', 'remote-folders', sourceId, projectId, environment, path] as const,
+		browse: (sourceId: string, kind: string, projectId = '', environment = '', path = '') =>
+			['secret-sources', 'browse', sourceId, kind, projectId, environment, path] as const,
 		binding: (environmentId: string, projectId: string) => ['secret-sources', 'binding', environmentId, projectId] as const
 	},
 	notifications: {

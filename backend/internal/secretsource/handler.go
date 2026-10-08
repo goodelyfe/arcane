@@ -42,15 +42,12 @@ type TestSourceInput struct {
 	Body secretsourcetypes.TestSourceRequest
 }
 
-type ListRemoteProjectsInput struct {
-	ID string `path:"id" doc:"Secret source ID"`
-}
-
-type ListRemoteFoldersInput struct {
+type BrowseSourceInput struct {
 	ID          string `path:"id" doc:"Secret source ID"`
-	ProjectID   string `query:"projectId" doc:"Project ID in the secret manager"`
-	Environment string `query:"environment" doc:"Environment slug"`
-	Path        string `query:"path" doc:"Folder path to list" default:"/"`
+	Kind        string `query:"kind" doc:"What to list: projects or folders (Infisical); folders, collections, or items (Bitwarden)"`
+	ProjectID   string `query:"projectId" doc:"Infisical project ID, for folders"`
+	Environment string `query:"environment" doc:"Infisical environment slug, for folders"`
+	Path        string `query:"path" doc:"Infisical folder path to list" default:"/"`
 }
 
 type ProjectBindingInput struct {
@@ -111,20 +108,17 @@ func (h *SecretSourceHandler) TestSource(ctx context.Context, input *TestSourceI
 	return okInternal(result), nil
 }
 
-func (h *SecretSourceHandler) ListRemoteProjects(ctx context.Context, input *ListRemoteProjectsInput) (*handlerutil.Out[[]secretsourcetypes.RemoteProject], error) {
-	remote, err := h.service.ListRemoteProjects(ctx, input.ID)
+func (h *SecretSourceHandler) Browse(ctx context.Context, input *BrowseSourceInput) (*handlerutil.Out[[]secretsourcetypes.BrowseItem], error) {
+	items, err := h.service.Browse(ctx, input.ID, secretsourcetypes.BrowseQuery{
+		Kind:        input.Kind,
+		ProjectID:   input.ProjectID,
+		Environment: input.Environment,
+		Path:        input.Path,
+	})
 	if err != nil {
 		return nil, httpErrorInternal(err)
 	}
-	return okInternal(remote), nil
-}
-
-func (h *SecretSourceHandler) ListRemoteFolders(ctx context.Context, input *ListRemoteFoldersInput) (*handlerutil.Out[[]string], error) {
-	folders, err := h.service.ListRemoteFolders(ctx, input.ID, input.ProjectID, input.Environment, input.Path)
-	if err != nil {
-		return nil, httpErrorInternal(err)
-	}
-	return okInternal(folders), nil
+	return okInternal(items), nil
 }
 
 func (h *SecretSourceHandler) GetProjectBinding(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[*secretsourcetypes.Binding], error) {

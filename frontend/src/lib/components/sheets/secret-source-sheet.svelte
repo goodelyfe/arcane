@@ -6,15 +6,19 @@
 	import FormInput from '#lib/components/form/form-input.svelte';
 	import SheetFooterActions from '#lib/components/sheets/sheet-footer-actions.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
+	import { Label } from '#lib/components/ui/label/index.js';
+	import * as RadioGroup from '#lib/components/ui/radio-group/index.js';
 	import * as ResponsiveDialog from '#lib/components/ui/responsive-dialog/index.js';
 	import { AlertIcon, CheckIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
 	import type {
+		SecretProvider,
 		SecretSource,
 		SecretSourceCreateDto,
 		SecretSourceTestResult,
-		SecretSourceUpdateDto
+		SecretSourceUpdateDto,
+		SourceSettings
 	} from '#lib/types/secret-source.js';
 	import { extractApiErrorMessage } from '#lib/utils/api.js';
 	import { createForm, preventDefault } from '#lib/utils/settings.svelte.js';
@@ -37,18 +41,44 @@
 	} = $props();
 
 	const isEditMode = $derived(!!sourceToEdit);
-	const hasStoredSecret = $derived(!!sourceToEdit?.hasClientSecret);
+	const hasStoredSecret = $derived(!!sourceToEdit?.hasCredential);
+
+	// The provider is fixed once a source exists; bindings depend on it.
+	let provider = $state<SecretProvider>(untrack(() => sourceToEdit?.provider ?? 'infisical'));
+
+	const providers: { value: SecretProvider; label: () => string; description: () => string }[] = [
+		{
+			value: 'infisical',
+			label: m.secret_sources_provider_infisical,
+			description: m.secret_sources_provider_infisical_description
+		},
+		{
+			value: 'bitwarden',
+			label: m.secret_sources_provider_bitwarden,
+			description: m.secret_sources_provider_bitwarden_description
+		}
+	];
 
 	const formSchema = untrack(() =>
 		z
 			.object({
 				name: z.string().trim().min(1, m.common_name_required()),
 				siteUrl: z.string().trim(),
-				clientId: z.string().trim().min(1, m.secret_sources_client_id_required()),
+				clientId: z.string().trim(),
 				clientSecret: z.string(),
-				organizationSlug: z.string().trim()
+				organizationSlug: z.string().trim(),
+				serveUrl: z.string().trim()
 			})
 			.superRefine((data, ctx) => {
+				if (provider === 'bitwarden') {
+					if (!data.serveUrl) {
+						ctx.addIssue({ code: 'custom', path: ['serveUrl'], message: m.secret_sources_serve_url_required() });
+					}
+					return;
+				}
+				if (!data.clientId) {
+					ctx.addIssue({ code: 'custom', path: ['clientId'], message: m.secret_sources_client_id_required() });
+				}
 				// Editing keeps the stored secret when the field is left empty.
 				if (!sourceToEdit && data.clientSecret === '') {
 					ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_client_secret_required() });
@@ -60,10 +90,11 @@
 		formSchema,
 		untrack(() => ({
 			name: sourceToEdit?.name ?? '',
-			siteUrl: sourceToEdit?.siteUrl ?? '',
-			clientId: sourceToEdit?.clientId ?? '',
+			siteUrl: sourceToEdit?.settings.infisical?.siteUrl ?? '',
+			clientId: sourceToEdit?.settings.infisical?.clientId ?? '',
 			clientSecret: '',
-			organizationSlug: sourceToEdit?.organizationSlug ?? ''
+			organizationSlug: sourceToEdit?.settings.infisical?.organizationSlug ?? '',
+			serveUrl: sourceToEdit?.settings.bitwarden?.serveUrl ?? ''
 		}))
 	);
 	let inputs = $derived(form.inputs);
@@ -71,32 +102,55 @@
 	let testing = $state(false);
 	let testResult = $state<SecretSourceTestResult | null>(null);
 
+	function currentSettings(): SourceSettings {
+		if (provider === 'bitwarden') {
+			return { bitwarden: { serveUrl: inputs.serveUrl.value.trim() } };
+		}
+		return {
+			infisical: {
+				siteUrl: inputs.siteUrl.value.trim(),
+				clientId: inputs.clientId.value.trim(),
+				organizationSlug: inputs.organizationSlug.value.trim()
+			}
+		};
+	}
+
+	function visibleLabel(result: SecretSourceTestResult): string {
+		return provider === 'bitwarden'
+			? m.secret_sources_test_visible_items({ count: result.visibleCount })
+			: m.secret_sources_test_visible_projects({ count: result.visibleCount });
+	}
+
 	async function testConnection() {
 		testResult = null;
-		const clientId = inputs.clientId.value.trim();
-		const clientSecret = inputs.clientSecret.value;
-		if (!clientId) {
-			inputs.clientId.error = m.secret_sources_client_id_required();
-			return;
-		}
-		if (!clientSecret && !hasStoredSecret) {
-			inputs.clientSecret.error = m.secret_sources_client_secret_required();
-			return;
+		if (provider === 'bitwarden') {
+			if (!inputs.serveUrl.value.trim()) {
+				inputs.serveUrl.error = m.secret_sources_serve_url_required();
+				return;
+			}
+		} else {
+			if (!inputs.clientId.value.trim()) {
+				inputs.clientId.error = m.secret_sources_client_id_required();
+				return;
+			}
+			if (!inputs.clientSecret.value && !hasStoredSecret) {
+				inputs.clientSecret.error = m.secret_sources_client_secret_required();
+				return;
+			}
 		}
 
 		testing = true;
 		const result = await tryCatch(
 			secretSourceService.test({
 				sourceId: sourceToEdit?.id,
-				siteUrl: inputs.siteUrl.value.trim(),
-				clientId,
-				clientSecret: clientSecret || undefined,
-				organizationSlug: inputs.organizationSlug.value.trim()
+				provider,
+				settings: currentSettings(),
+				credential: provider === 'infisical' ? inputs.clientSecret.value || undefined : undefined
 			})
 		);
 		testing = false;
 		testResult = result.error
-			? { ok: false, message: extractApiErrorMessage(result.error), projectsVisible: 0, canListProjects: false }
+			? { ok: false, message: extractApiErrorMessage(result.error), canBrowse: false, visibleCount: 0 }
 			: result.data;
 	}
 
@@ -104,28 +158,14 @@
 		const data = form.validate();
 		if (!data) return;
 
+		const settings = currentSettings();
+		const credential = provider === 'infisical' && data.clientSecret ? data.clientSecret : undefined;
+
 		if (isEditMode && sourceToEdit) {
-			const dto: SecretSourceUpdateDto = {
-				name: data.name,
-				siteUrl: data.siteUrl,
-				clientId: data.clientId,
-				organizationSlug: data.organizationSlug
-			};
-			if (data.clientSecret) dto.clientSecret = data.clientSecret;
-			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: dto });
+			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: { name: data.name, settings, credential } });
 			return;
 		}
-
-		onSubmit({
-			mode: 'create',
-			source: {
-				name: data.name,
-				siteUrl: data.siteUrl || undefined,
-				clientId: data.clientId,
-				clientSecret: data.clientSecret,
-				organizationSlug: data.organizationSlug || undefined
-			}
-		});
+		onSubmit({ mode: 'create', source: { name: data.name, provider, settings, credential } });
 	}
 </script>
 
@@ -138,32 +178,70 @@
 >
 	{#snippet children()}
 		<form id="secret-source-form" onsubmit={preventDefault(handleSubmit)} class="grid gap-4 py-6">
+			<div class="space-y-2">
+				<Label class="mb-0">{m.secret_sources_provider()}</Label>
+				<RadioGroup.Root
+					class="mt-2"
+					value={provider}
+					disabled={isEditMode}
+					onValueChange={(value) => {
+						provider = value as SecretProvider;
+						testResult = null;
+					}}
+				>
+					<div class="grid gap-2">
+						{#each providers as option (option.value)}
+							<label
+								class="flex cursor-pointer items-start gap-3 rounded-md border border-border/50 p-3 hover:bg-accent/40 has-disabled:cursor-not-allowed has-disabled:opacity-70"
+							>
+								<RadioGroup.Item value={option.value} class="mt-0.5" />
+								<div class="grid gap-1 leading-none">
+									<span class="text-sm font-medium">{option.label()}</span>
+									<span class="text-xs text-muted-foreground">{option.description()}</span>
+								</div>
+							</label>
+						{/each}
+					</div>
+				</RadioGroup.Root>
+			</div>
+
 			<FormInput label={m.common_name()} type="text" placeholder={m.secret_sources_name_placeholder()} bind:input={inputs.name} />
 
-			<FormInput
-				label={m.secret_sources_site_url()}
-				type="text"
-				placeholder="https://app.infisical.com"
-				helpText={m.secret_sources_site_url_description()}
-				bind:input={inputs.siteUrl}
-			/>
+			{#if provider === 'bitwarden'}
+				<FormInput
+					label={m.secret_sources_serve_url()}
+					type="text"
+					placeholder="http://bw-serve:8087"
+					helpText={m.secret_sources_serve_url_description()}
+					bind:input={inputs.serveUrl}
+				/>
+				<Alert.Root variant="info" icon={AlertIcon} description={m.secret_sources_bitwarden_hardening()} />
+			{:else}
+				<FormInput
+					label={m.secret_sources_site_url()}
+					type="text"
+					placeholder="https://app.infisical.com"
+					helpText={m.secret_sources_site_url_description()}
+					bind:input={inputs.siteUrl}
+				/>
 
-			<FormInput label={m.secret_sources_client_id()} type="text" autocomplete="off" bind:input={inputs.clientId} />
+				<FormInput label={m.secret_sources_client_id()} type="text" autocomplete="off" bind:input={inputs.clientId} />
 
-			<FormInput
-				label={m.secret_sources_client_secret()}
-				type="password"
-				autocomplete="new-password"
-				placeholder={hasStoredSecret ? m.common_keep_placeholder() : ''}
-				bind:input={inputs.clientSecret}
-			/>
+				<FormInput
+					label={m.secret_sources_client_secret()}
+					type="password"
+					autocomplete="new-password"
+					placeholder={hasStoredSecret ? m.common_keep_placeholder() : ''}
+					bind:input={inputs.clientSecret}
+				/>
 
-			<FormInput
-				label={m.secret_sources_organization_slug()}
-				type="text"
-				helpText={m.secret_sources_organization_slug_description()}
-				bind:input={inputs.organizationSlug}
-			/>
+				<FormInput
+					label={m.secret_sources_organization_slug()}
+					type="text"
+					helpText={m.secret_sources_organization_slug_description()}
+					bind:input={inputs.organizationSlug}
+				/>
+			{/if}
 
 			<div class="space-y-3 border-t border-border/50 pt-4">
 				<ArcaneButton
@@ -181,9 +259,8 @@
 						<Alert.Root
 							variant="primary-subtle"
 							icon={CheckIcon}
-							heading={testResult.canListProjects
-								? m.secret_sources_test_success({ count: testResult.projectsVisible })
-								: testResult.message}
+							heading={testResult.message}
+							description={testResult.canBrowse ? visibleLabel(testResult) : undefined}
 						/>
 					{:else}
 						<Alert.Root

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,17 +26,28 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/common"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/database"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/event"
-	"github.com/getarcaneapp/arcane/backend/v2/pkg/infisical"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/bitwarden"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
 
 const (
-	fetchTimeout       = 20 * time.Second
+	providerTimeout    = 30 * time.Second
 	localEnvironmentID = "0"
 )
 
 // envKeyPattern matches names that compose can interpolate and pass through.
 var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// secretProvider is what each provider child implements.
+type secretProvider interface {
+	// Test reports connection problems in the result rather than as an error.
+	Test(ctx context.Context) secretsourcetypes.TestSourceResult
+	Browse(ctx context.Context, query secretsourcetypes.BrowseQuery) ([]secretsourcetypes.BrowseItem, error)
+	// Fetch returns the target's values and the names of entries it skipped
+	// because they have no usable value.
+	Fetch(ctx context.Context, target secretsourcetypes.BindingTarget) (map[string]string, []string, error)
+}
 
 // ProjectRef identifies the project a binding belongs to. Path and
 // ProjectsDirectory are only needed to report .env keys that a secret overrides.
@@ -57,32 +69,49 @@ type DeployEnv struct {
 	Hash   string
 }
 
-// SecretSourceService manages secret sources, project bindings, and the
-// deploy-time fetch of bound secrets. Secret values are only ever held in
-// memory for the duration of a deploy or check.
+// DriftChange reports a project whose secrets changed since its last deploy,
+// the first time a background check sees that change.
+type DriftChange struct {
+	ProjectID    string
+	ProjectName  string
+	AutoRedeploy bool
+}
+
+// fetchOptions tunes one fetch. Quiet fetches (background checks) log no
+// success event and log an error only when it differs from the last one.
+type fetchOptions struct {
+	reason      string
+	requireKeys bool
+	quiet       bool
+}
+
+// SecretSourceService manages secret sources, project bindings, deploy-time
+// fetches, and background drift checks. Secret values are only held in memory
+// for the duration of a deploy or check.
 type SecretSourceService struct {
 	db           *database.DB
 	eventService *event.EventService
 	httpClient   *http.Client
 
-	clientsMu sync.Mutex
-	clients   map[string]cachedClient
+	providersMu sync.Mutex
+	providers   map[string]cachedProvider
 }
 
-type cachedClient struct {
+type cachedProvider struct {
 	fingerprint string
-	client      *infisical.Client
+	provider    secretProvider
 }
 
 func NewSecretSourceService(db *database.DB, eventService *event.EventService) *SecretSourceService {
 	return &SecretSourceService{
 		db:           db,
 		eventService: eventService,
-		// Not the SSRF-safe client: self-hosted Infisical normally lives on a
-		// private, VPN, or tailnet address, which that client rejects. Creating
-		// a source requires the secret-sources:create permission.
-		httpClient: &http.Client{Timeout: fetchTimeout},
-		clients:    make(map[string]cachedClient),
+		// Not the SSRF-safe client: self-hosted secret managers and bw serve
+		// normally live on private, VPN, tailnet, or Docker network addresses,
+		// which that client rejects. Creating a source requires the
+		// secret-sources:create permission.
+		httpClient: &http.Client{Timeout: providerTimeout},
+		providers:  make(map[string]cachedProvider),
 	}
 }
 
@@ -122,30 +151,24 @@ func (s *SecretSourceService) CreateSource(ctx context.Context, req secretsource
 	if name == "" {
 		return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("name is required"))
 	}
-	siteURL, err := normalizeSiteURLInternal(req.SiteURL)
+	settings, err := normalizeSettingsInternal(req.Provider, req.Settings)
 	if err != nil {
 		return nil, err
 	}
-	clientID := strings.TrimSpace(req.ClientID)
-	if clientID == "" || req.ClientSecret == "" {
-		return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("client ID and client secret are required"))
+	credential := ""
+	if providerNeedsCredentialInternal(req.Provider) {
+		if req.Credential == "" {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("a client secret is required"))
+		}
+		if credential, err = crypto.Encrypt(req.Credential); err != nil {
+			return nil, fmt.Errorf("failed to encrypt credential: %w", err)
+		}
 	}
 	if conflictErr := s.ensureNameAvailableInternal(ctx, name, ""); conflictErr != nil {
 		return nil, conflictErr
 	}
-	encrypted, err := crypto.Encrypt(req.ClientSecret)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encrypt client secret: %w", err)
-	}
 
-	source := SecretSource{
-		Name:             name,
-		Provider:         secretsourcetypes.ProviderInfisical,
-		SiteURL:          siteURL,
-		ClientID:         clientID,
-		ClientSecret:     encrypted,
-		OrganizationSlug: strings.TrimSpace(req.OrganizationSlug),
-	}
+	source := SecretSource{Name: name, Provider: req.Provider, Settings: settings, Credential: credential}
 	if createErr := s.db.WithContext(ctx).Create(&source).Error; createErr != nil {
 		return nil, fmt.Errorf("failed to create secret source: %w", createErr)
 	}
@@ -158,7 +181,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	if err != nil {
 		return nil, err
 	}
-	before := *source
+	beforeFingerprint := connectionFingerprintInternal(source)
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -170,36 +193,22 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 		}
 		source.Name = name
 	}
-	if req.SiteURL != nil {
-		siteURL, siteErr := normalizeSiteURLInternal(*req.SiteURL)
-		if siteErr != nil {
-			return nil, siteErr
+	if req.Settings != nil {
+		settings, settingsErr := normalizeSettingsInternal(source.Provider, *req.Settings)
+		if settingsErr != nil {
+			return nil, settingsErr
 		}
-		source.SiteURL = siteURL
+		source.Settings = settings
 	}
-	if req.ClientID != nil {
-		clientID := strings.TrimSpace(*req.ClientID)
-		if clientID == "" {
-			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("client ID is required"))
-		}
-		source.ClientID = clientID
-	}
-	if req.ClientSecret != nil && *req.ClientSecret != "" {
-		encrypted, encryptErr := crypto.Encrypt(*req.ClientSecret)
+	if req.Credential != nil && *req.Credential != "" && providerNeedsCredentialInternal(source.Provider) {
+		encrypted, encryptErr := crypto.Encrypt(*req.Credential)
 		if encryptErr != nil {
-			return nil, fmt.Errorf("failed to encrypt client secret: %w", encryptErr)
+			return nil, fmt.Errorf("failed to encrypt credential: %w", encryptErr)
 		}
-		source.ClientSecret = encrypted
-	}
-	if req.OrganizationSlug != nil {
-		source.OrganizationSlug = strings.TrimSpace(*req.OrganizationSlug)
+		source.Credential = encrypted
 	}
 	// A test result only describes the connection it was run against.
-	connectionChanged := source.SiteURL != before.SiteURL ||
-		source.ClientID != before.ClientID ||
-		source.ClientSecret != before.ClientSecret ||
-		source.OrganizationSlug != before.OrganizationSlug
-	if connectionChanged {
+	if connectionFingerprintInternal(source) != beforeFingerprint {
 		source.LastTestedAt = nil
 		source.LastTestError = nil
 	}
@@ -207,7 +216,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	if saveErr := s.db.WithContext(ctx).Save(source).Error; saveErr != nil {
 		return nil, fmt.Errorf("failed to update secret source: %w", saveErr)
 	}
-	s.forgetClientInternal(source.ID)
+	s.forgetProviderInternal(source.ID)
 	return s.GetSource(ctx, source.ID)
 }
 
@@ -226,131 +235,90 @@ func (s *SecretSourceService) DeleteSource(ctx context.Context, id string) error
 	if deleteErr := s.db.WithContext(ctx).Delete(&SecretSource{}, "id = ?", source.ID).Error; deleteErr != nil {
 		return fmt.Errorf("failed to delete secret source: %w", deleteErr)
 	}
-	s.forgetClientInternal(source.ID)
+	s.forgetProviderInternal(source.ID)
 	return nil
 }
 
-// TestSource logs in with the given settings and checks whether the identity
-// can list projects. Connection failures are reported in the result rather
-// than as an error, so the UI can show Infisical's message inline.
+// TestSource tests settings without saving them. The result is recorded on
+// the source only when the tested settings and credential are the stored
+// ones, so an unsaved edit never overwrites the saved status.
 func (s *SecretSourceService) TestSource(ctx context.Context, req secretsourcetypes.TestSourceRequest) (secretsourcetypes.TestSourceResult, error) {
-	cfg := infisical.Config{
-		SiteURL:          req.SiteURL,
-		ClientID:         req.ClientID,
-		ClientSecret:     req.ClientSecret,
-		OrganizationSlug: req.OrganizationSlug,
-	}
-
-	// Record the result on the source only when the tested settings are the
-	// ones it stores, so an unsaved edit never overwrites the saved status.
-	recordOn := ""
+	providerName := req.Provider
+	credential := req.Credential
+	var stored *SecretSource
 	if req.SourceID != "" {
 		source, err := s.loadSourceInternal(ctx, req.SourceID)
 		if err != nil {
 			return secretsourcetypes.TestSourceResult{}, err
 		}
-		storedSecret, decryptErr := crypto.Decrypt(source.ClientSecret)
+		stored = source
+		providerName = source.Provider
+	}
+
+	settings, err := normalizeSettingsInternal(providerName, req.Settings)
+	if err != nil {
+		return secretsourcetypes.TestSourceResult{OK: false, Message: err.Error()}, nil
+	}
+
+	recordOn := ""
+	if stored != nil {
+		storedCredential, decryptErr := decryptCredentialInternal(stored.Credential)
 		if decryptErr != nil {
-			return secretsourcetypes.TestSourceResult{}, fmt.Errorf("failed to decrypt stored client secret: %w", decryptErr)
+			return secretsourcetypes.TestSourceResult{}, decryptErr
 		}
-		if cfg.ClientSecret == "" {
-			cfg.ClientSecret = storedSecret
+		if credential == "" {
+			credential = storedCredential
 		}
-		if cfg.ClientSecret == storedSecret && sameConnectionInternal(source, cfg) {
-			recordOn = source.ID
+		candidate := *stored
+		candidate.Settings = settings
+		if credential == storedCredential && connectionFingerprintInternal(&candidate) == connectionFingerprintInternal(stored) {
+			recordOn = stored.ID
 		}
 	}
 
-	result := s.runTestInternal(ctx, cfg)
+	provider, err := s.newProviderInternal(providerName, settings, credential)
+	if err != nil {
+		return secretsourcetypes.TestSourceResult{OK: false, Message: err.Error()}, nil
+	}
+	testCtx, cancel := context.WithTimeout(ctx, providerTimeout)
+	defer cancel()
+	result := provider.Test(testCtx)
 	if recordOn != "" {
 		s.recordTestInternal(ctx, recordOn, result)
 	}
 	return result, nil
 }
 
-func (s *SecretSourceService) runTestInternal(ctx context.Context, cfg infisical.Config) secretsourcetypes.TestSourceResult {
-	client, err := infisical.NewClient(s.httpClient, cfg)
-	if err != nil {
-		return secretsourcetypes.TestSourceResult{OK: false, Message: err.Error()}
-	}
-	testCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-	defer cancel()
-
-	session, err := client.Login(testCtx)
-	if err != nil {
-		return secretsourcetypes.TestSourceResult{OK: false, Message: err.Error()}
-	}
-	result := secretsourcetypes.TestSourceResult{
-		OK:              true,
-		Message:         "Authenticated with Infisical",
-		TokenTTLSeconds: int64(session.ExpiresIn / time.Second),
-	}
-	remote, err := client.ListProjects(testCtx)
-	if err != nil {
-		result.Message = "Authenticated, but this identity cannot list projects; enter the project ID by hand"
-		return result
-	}
-	result.CanListProjects = true
-	result.ProjectsVisible = len(remote)
-	return result
-}
-
 func (s *SecretSourceService) recordTestInternal(ctx context.Context, sourceID string, result secretsourcetypes.TestSourceResult) {
-	now := time.Now()
 	var testError *string
 	if !result.OK {
 		testError = new(result.Message)
 	}
 	err := s.db.WithContext(ctx).Model(&SecretSource{}).Where("id = ?", sourceID).
-		UpdateColumns(map[string]any{"last_tested_at": now, "last_test_error": testError}).Error
+		UpdateColumns(map[string]any{"last_tested_at": time.Now(), "last_test_error": testError}).Error
 	if err != nil {
 		slog.WarnContext(ctx, "failed to record secret source test result", "sourceId", sourceID, "error", err)
 	}
 }
 
-// ListRemoteProjects returns the Infisical projects the source's identity can
-// see, with their environments, for the binding pickers.
-func (s *SecretSourceService) ListRemoteProjects(ctx context.Context, sourceID string) ([]secretsourcetypes.RemoteProject, error) {
-	client, err := s.clientForSourceIDInternal(ctx, sourceID)
+// Browse lists pickable targets of a source, such as Infisical projects or
+// Bitwarden folders.
+func (s *SecretSourceService) Browse(ctx context.Context, sourceID string, query secretsourcetypes.BrowseQuery) ([]secretsourcetypes.BrowseItem, error) {
+	source, err := s.loadSourceInternal(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
-	listCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-	defer cancel()
-
-	remote, err := client.ListProjects(listCtx)
-	if err != nil {
-		return nil, common.Classify(common.ErrSecretFetchFailed, err)
-	}
-	result := make([]secretsourcetypes.RemoteProject, 0, len(remote))
-	for _, project := range remote {
-		envs := make([]secretsourcetypes.RemoteEnvironment, 0, len(project.Environments))
-		for _, env := range project.Environments {
-			envs = append(envs, secretsourcetypes.RemoteEnvironment{Name: env.Name, Slug: env.Slug})
-		}
-		result = append(result, secretsourcetypes.RemoteProject{ID: project.ID, Name: project.Name, Slug: project.Slug, Environments: envs})
-	}
-	return result, nil
-}
-
-// ListRemoteFolders returns the folder names directly under path.
-func (s *SecretSourceService) ListRemoteFolders(ctx context.Context, sourceID, remoteProjectID, environment, path string) ([]string, error) {
-	if strings.TrimSpace(remoteProjectID) == "" || strings.TrimSpace(environment) == "" {
-		return nil, common.Classify(common.ErrSecretBindingInvalid, errors.New("project and environment are required"))
-	}
-	client, err := s.clientForSourceIDInternal(ctx, sourceID)
+	provider, err := s.providerForSourceInternal(source)
 	if err != nil {
 		return nil, err
 	}
-	listCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	browseCtx, cancel := context.WithTimeout(ctx, providerTimeout)
 	defer cancel()
-
-	folders, err := client.ListFolders(listCtx, remoteProjectID, environment, path)
+	items, err := provider.Browse(browseCtx, query)
 	if err != nil {
 		return nil, common.Classify(common.ErrSecretFetchFailed, err)
 	}
-	slices.Sort(folders)
-	return folders, nil
+	return items, nil
 }
 
 // ---- Bindings ----
@@ -369,10 +337,12 @@ func (s *SecretSourceService) GetBinding(ctx context.Context, projectID string) 
 }
 
 func (s *SecretSourceService) UpsertBinding(ctx context.Context, projectID string, req secretsourcetypes.UpsertBindingRequest) (*secretsourcetypes.Binding, error) {
-	if strings.TrimSpace(req.RemoteProjectID) == "" || strings.TrimSpace(req.Environment) == "" {
-		return nil, common.Classify(common.ErrSecretBindingInvalid, errors.New("project and environment are required"))
+	source, err := s.loadSourceInternal(ctx, req.SourceID)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := s.loadSourceInternal(ctx, req.SourceID); err != nil {
+	target, err := normalizeTargetInternal(source.Provider, req.Target)
+	if err != nil {
 		return nil, err
 	}
 
@@ -388,15 +358,19 @@ func (s *SecretSourceService) UpsertBinding(ctx context.Context, projectID strin
 		return nil, err
 	}
 
-	binding.SourceID = req.SourceID
+	// A different source or target makes the last check meaningless; the
+	// deployed hash stays, because the running containers still use it.
+	if binding.SourceID != source.ID || !sameTargetInternal(binding.Target, target) {
+		binding.LastSeenHash = nil
+		binding.LastNotifiedHash = nil
+		binding.LastCheckedAt = nil
+	}
+	binding.SourceID = source.ID
 	binding.Source = nil
-	binding.RemoteProjectID = strings.TrimSpace(req.RemoteProjectID)
-	binding.Environment = strings.TrimSpace(req.Environment)
-	binding.SecretPath = infisical.NormalizeSecretPath(req.SecretPath)
-	binding.IncludeImports = req.IncludeImports
-	binding.ExpandReferences = req.ExpandReferences
+	binding.Target = target
 	binding.Required = req.Required
 	binding.Enabled = req.Enabled
+	binding.AutoRedeploy = req.AutoRedeploy
 	binding.LastFetchError = nil
 
 	if saveErr := s.db.WithContext(ctx).Save(binding).Error; saveErr != nil {
@@ -423,30 +397,34 @@ func (s *SecretSourceService) CheckBinding(ctx context.Context, project ProjectR
 	if err != nil {
 		return secretsourcetypes.CheckResult{}, err
 	}
-	values, invalid, err := s.fetchInternal(ctx, binding, project, actor, "check", false)
+	values, skipped, err := s.fetchInternal(ctx, binding, project, actor, fetchOptions{reason: "check"})
 	if err != nil {
 		return secretsourcetypes.CheckResult{}, err
 	}
+
+	hash := hashValuesInternal(binding.HashSalt, values)
+	s.recordSeenInternal(ctx, binding.ID, hash)
 
 	keys := sortedKeysInternal(values)
 	result := secretsourcetypes.CheckResult{
 		Keys:           keys,
 		OverriddenKeys: overriddenKeysInternal(ctx, project, keys),
-		InvalidKeys:    invalid,
+		InvalidKeys:    skipped,
 		FetchedAt:      time.Now(),
 		DeployedAt:     binding.DeployedAt,
 		NeverDeployed:  binding.DeployedHash == nil,
 	}
-	if binding.DeployedHash != nil {
-		result.RedeployNeeded = hashValuesInternal(binding.HashSalt, values) != *binding.DeployedHash
+	// An empty set is reported on its own; calling it drift adds nothing.
+	if binding.DeployedHash != nil && len(keys) > 0 {
+		result.RedeployNeeded = hash != *binding.DeployedHash
 	}
 	return result, nil
 }
 
 // ResolveDeployEnv fetches the project's bound secrets for a deploy. It
 // returns a nil Values map when the project has no enabled binding. When the
-// fetch fails, a required binding returns an error and blocks the deploy; an
-// optional one logs the failure and lets the deploy continue without secrets.
+// fetch fails or returns nothing usable, a required binding returns an error
+// and blocks the deploy; an optional one logs and lets the deploy continue.
 func (s *SecretSourceService) ResolveDeployEnv(ctx context.Context, project ProjectRef, actor usertypes.Actor) (DeployEnv, error) {
 	binding, err := s.loadBindingInternal(ctx, project.ID)
 	if errors.Is(err, common.ErrSecretBindingNotFound) {
@@ -459,7 +437,7 @@ func (s *SecretSourceService) ResolveDeployEnv(ctx context.Context, project Proj
 		return DeployEnv{}, nil
 	}
 
-	values, _, err := s.fetchInternal(ctx, binding, project, actor, "deploy", binding.Required)
+	values, _, err := s.fetchInternal(ctx, binding, project, actor, fetchOptions{reason: "deploy", requireKeys: binding.Required})
 	if err != nil {
 		if binding.Required {
 			return DeployEnv{}, err
@@ -471,81 +449,132 @@ func (s *SecretSourceService) ResolveDeployEnv(ctx context.Context, project Proj
 }
 
 // RecordDeployed stores the hash of the secret set a successful deploy used.
+// The deploy resolves any pending drift, so the seen and notified hashes move
+// with it.
 func (s *SecretSourceService) RecordDeployed(ctx context.Context, projectID, hash string) {
 	if hash == "" {
 		return
 	}
 	err := s.db.WithContext(ctx).Model(&ProjectSecretBinding{}).Where("project_id = ?", projectID).
-		UpdateColumns(map[string]any{"deployed_hash": hash, "deployed_at": time.Now()}).Error
+		UpdateColumns(map[string]any{
+			"deployed_hash":      hash,
+			"deployed_at":        time.Now(),
+			"last_seen_hash":     hash,
+			"last_notified_hash": hash,
+		}).Error
 	if err != nil {
 		slog.WarnContext(ctx, "failed to record deployed secret hash", "projectId", projectID, "error", err)
 	}
 }
 
-// fetchInternal reads the binding's secrets, drops keys that are not valid
+// CheckDrift fetches every enabled, deployed binding and returns the projects
+// whose secrets changed since their last deploy. Each change is returned, and
+// logged as an event, only once; failures are logged when they first appear.
+func (s *SecretSourceService) CheckDrift(ctx context.Context, resolve ProjectResolver) []DriftChange {
+	var bindings []ProjectSecretBinding
+	err := s.db.WithContext(ctx).Preload("Source").
+		Where("enabled = ? AND deployed_hash IS NOT NULL", true).
+		Find(&bindings).Error
+	if err != nil {
+		slog.WarnContext(ctx, "failed to load secret bindings for drift check", "error", err)
+		return nil
+	}
+
+	var changes []DriftChange
+	for i := range bindings {
+		binding := &bindings[i]
+		project := ProjectRef{ID: binding.ProjectID, Name: binding.ProjectID}
+		if resolve != nil {
+			if resolved, resolveErr := resolve(ctx, binding.ProjectID); resolveErr == nil {
+				project = resolved
+			}
+		}
+
+		values, _, fetchErr := s.fetchInternal(ctx, binding, project, usertypes.SystemUser, fetchOptions{reason: "drift-check", quiet: true})
+		if fetchErr != nil || len(values) == 0 {
+			continue
+		}
+		hash := hashValuesInternal(binding.HashSalt, values)
+		s.recordSeenInternal(ctx, binding.ID, hash)
+		if binding.DeployedHash == nil || hash == *binding.DeployedHash {
+			continue
+		}
+		if binding.LastNotifiedHash != nil && hash == *binding.LastNotifiedHash {
+			continue
+		}
+
+		s.recordNotifiedInternal(ctx, binding.ID, hash)
+		s.logEventInternal(ctx, event.EventTypeProjectSecretsChanged, project, usertypes.SystemUser, database.JSON{
+			"sourceId":     binding.SourceID,
+			"target":       describeTargetInternal(binding),
+			"autoRedeploy": binding.AutoRedeploy,
+		})
+		changes = append(changes, DriftChange{ProjectID: project.ID, ProjectName: project.Name, AutoRedeploy: binding.AutoRedeploy})
+	}
+	return changes
+}
+
+// fetchInternal reads the binding's secrets, drops names that are not valid
 // environment variable names, records the outcome on the binding, and logs an
 // event without any secret values. With requireKeys, an empty result is a
 // failure: a required binding that delivers nothing is almost always pointed at
-// the wrong environment or path.
+// the wrong target.
 func (s *SecretSourceService) fetchInternal(
 	ctx context.Context,
 	binding *ProjectSecretBinding,
 	project ProjectRef,
 	actor usertypes.Actor,
-	reason string,
-	requireKeys bool,
-) (values map[string]string, invalid []string, err error) {
-	client, source, err := s.clientForSourceInternal(binding.Source)
+	opts fetchOptions,
+) (values map[string]string, skipped []string, err error) {
+	provider, err := s.providerForSourceInternal(binding.Source)
 	if err == nil {
-		fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
-		values, err = client.ListSecrets(fetchCtx, infisical.SecretsQuery{
-			ProjectID:              binding.RemoteProjectID,
-			Environment:            binding.Environment,
-			SecretPath:             binding.SecretPath,
-			IncludeImports:         binding.IncludeImports,
-			ExpandSecretReferences: binding.ExpandReferences,
-		})
+		fetchCtx, cancel := context.WithTimeout(ctx, providerTimeout)
+		values, skipped, err = provider.Fetch(fetchCtx, binding.Target)
 		cancel()
 	}
 
 	if err == nil {
 		for key := range values {
 			if !envKeyPattern.MatchString(key) {
-				invalid = append(invalid, key)
+				skipped = append(skipped, key)
 				delete(values, key)
 			}
 		}
-		slices.Sort(invalid)
-		if requireKeys && len(values) == 0 {
-			err = fmt.Errorf("infisical returned no usable secrets for environment %q, path %q; check the binding or turn off Required",
-				binding.Environment, binding.SecretPath)
+		slices.Sort(skipped)
+		if opts.requireKeys && len(values) == 0 {
+			err = fmt.Errorf("the source returned no usable secrets for %s; check the binding or turn off Required", describeTargetInternal(binding))
 		}
 	}
 
-	now := time.Now()
 	metadata := database.JSON{
-		"reason":      reason,
-		"sourceId":    binding.SourceID,
-		"environment": binding.Environment,
-		"secretPath":  binding.SecretPath,
+		"reason":   opts.reason,
+		"sourceId": binding.SourceID,
+		"target":   describeTargetInternal(binding),
 	}
-	if source != nil {
-		metadata["sourceName"] = source.Name
+	if binding.Source != nil {
+		metadata["sourceName"] = binding.Source.Name
+		metadata["provider"] = binding.Source.Provider
 	}
 
+	now := time.Now()
 	if err != nil {
 		message := err.Error()
+		repeated := binding.LastFetchError != nil && *binding.LastFetchError == message
 		s.updateFetchStatusInternal(ctx, binding.ID, now, &message)
-		metadata["error"] = message
-		s.logEventInternal(ctx, event.EventTypeProjectSecretsError, project, actor, metadata)
+		if !opts.quiet || !repeated {
+			metadata["error"] = message
+			s.logEventInternal(ctx, event.EventTypeProjectSecretsError, project, actor, metadata)
+		}
 		return nil, nil, common.Classify(common.ErrSecretFetchFailed, fmt.Errorf("failed to fetch secrets for project %q: %w", project.Name, err))
 	}
 
 	s.updateFetchStatusInternal(ctx, binding.ID, now, nil)
-	metadata["keyCount"] = len(values)
-	metadata["skippedKeyCount"] = len(invalid)
-	s.logEventInternal(ctx, event.EventTypeProjectSecretsFetch, project, actor, metadata)
-	return values, invalid, nil
+	if !opts.quiet {
+		metadata["keyCount"] = len(values)
+		metadata["skippedKeyCount"] = len(skipped)
+		s.logEventInternal(ctx, event.EventTypeProjectSecretsFetch, project, actor, metadata)
+	}
+	return values, skipped, nil
 }
 
 func (s *SecretSourceService) updateFetchStatusInternal(ctx context.Context, bindingID string, at time.Time, fetchError *string) {
@@ -553,6 +582,22 @@ func (s *SecretSourceService) updateFetchStatusInternal(ctx context.Context, bin
 		UpdateColumns(map[string]any{"last_fetched_at": at, "last_fetch_error": fetchError}).Error
 	if err != nil {
 		slog.WarnContext(ctx, "failed to record secret fetch status", "bindingId", bindingID, "error", err)
+	}
+}
+
+func (s *SecretSourceService) recordSeenInternal(ctx context.Context, bindingID, hash string) {
+	err := s.db.WithContext(ctx).Model(&ProjectSecretBinding{}).Where("id = ?", bindingID).
+		UpdateColumns(map[string]any{"last_seen_hash": hash, "last_checked_at": time.Now()}).Error
+	if err != nil {
+		slog.WarnContext(ctx, "failed to record checked secret hash", "bindingId", bindingID, "error", err)
+	}
+}
+
+func (s *SecretSourceService) recordNotifiedInternal(ctx context.Context, bindingID, hash string) {
+	err := s.db.WithContext(ctx).Model(&ProjectSecretBinding{}).Where("id = ?", bindingID).
+		UpdateColumn("last_notified_hash", hash).Error
+	if err != nil {
+		slog.WarnContext(ctx, "failed to record notified secret hash", "bindingId", bindingID, "error", err)
 	}
 }
 
@@ -565,52 +610,55 @@ func (s *SecretSourceService) logEventInternal(ctx context.Context, eventType ev
 	}
 }
 
-// ---- Clients ----
+// ---- Providers ----
 
-func (s *SecretSourceService) clientForSourceIDInternal(ctx context.Context, sourceID string) (*infisical.Client, error) {
-	source, err := s.loadSourceInternal(ctx, sourceID)
+// providerForSourceInternal reuses one provider per source so per-provider
+// state, such as Infisical's access token, survives across deploys. Editing
+// the source invalidates it.
+func (s *SecretSourceService) providerForSourceInternal(source *SecretSource) (secretProvider, error) {
+	if source == nil {
+		return nil, common.ErrSecretSourceNotFound
+	}
+	fingerprint := connectionFingerprintInternal(source)
+
+	s.providersMu.Lock()
+	defer s.providersMu.Unlock()
+	if cached, ok := s.providers[source.ID]; ok && cached.fingerprint == fingerprint {
+		return cached.provider, nil
+	}
+	credential, err := decryptCredentialInternal(source.Credential)
 	if err != nil {
 		return nil, err
 	}
-	client, _, err := s.clientForSourceInternal(source)
-	return client, err
+	provider, err := s.newProviderInternal(source.Provider, source.Settings, credential)
+	if err != nil {
+		return nil, err
+	}
+	s.providers[source.ID] = cachedProvider{fingerprint: fingerprint, provider: provider}
+	return provider, nil
 }
 
-// clientForSourceInternal reuses one client per source so its access token is
-// cached across deploys. Editing the source invalidates the cached client.
-func (s *SecretSourceService) clientForSourceInternal(source *SecretSource) (*infisical.Client, *SecretSource, error) {
-	if source == nil {
-		return nil, nil, common.ErrSecretSourceNotFound
+func (s *SecretSourceService) newProviderInternal(providerName string, settings secretsourcetypes.SourceSettings, credential string) (secretProvider, error) {
+	switch providerName {
+	case secretsourcetypes.ProviderInfisical:
+		if settings.Infisical == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("infisical settings are required"))
+		}
+		return infisical.New(s.httpClient, *settings.Infisical, credential)
+	case secretsourcetypes.ProviderBitwarden:
+		if settings.Bitwarden == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("bitwarden settings are required"))
+		}
+		return bitwarden.New(s.httpClient, *settings.Bitwarden)
+	default:
+		return nil, common.Classify(common.ErrSecretSourceInvalid, fmt.Errorf("unknown provider %q", providerName))
 	}
-	fingerprint := source.SiteURL + "\x00" + source.ClientID + "\x00" + source.ClientSecret + "\x00" + source.OrganizationSlug
-
-	s.clientsMu.Lock()
-	defer s.clientsMu.Unlock()
-	if cached, ok := s.clients[source.ID]; ok && cached.fingerprint == fingerprint {
-		return cached.client, source, nil
-	}
-
-	secret, err := crypto.Decrypt(source.ClientSecret)
-	if err != nil {
-		return nil, source, fmt.Errorf("failed to decrypt client secret for source %q: %w", source.Name, err)
-	}
-	client, err := infisical.NewClient(s.httpClient, infisical.Config{
-		SiteURL:          source.SiteURL,
-		ClientID:         source.ClientID,
-		ClientSecret:     secret,
-		OrganizationSlug: source.OrganizationSlug,
-	})
-	if err != nil {
-		return nil, source, err
-	}
-	s.clients[source.ID] = cachedClient{fingerprint: fingerprint, client: client}
-	return client, source, nil
 }
 
-func (s *SecretSourceService) forgetClientInternal(sourceID string) {
-	s.clientsMu.Lock()
-	defer s.clientsMu.Unlock()
-	delete(s.clients, sourceID)
+func (s *SecretSourceService) forgetProviderInternal(sourceID string) {
+	s.providersMu.Lock()
+	defer s.providersMu.Unlock()
+	delete(s.providers, sourceID)
 }
 
 // ---- Persistence helpers ----
@@ -676,22 +724,84 @@ func (s *SecretSourceService) ensureNameAvailableInternal(ctx context.Context, n
 
 // ---- Pure helpers ----
 
-func normalizeSiteURLInternal(raw string) (string, error) {
-	parsed, err := infisical.ParseSiteURL(raw)
-	if err != nil {
-		return "", common.Classify(common.ErrSecretSourceInvalid, err)
-	}
-	return parsed.String(), nil
+func providerNeedsCredentialInternal(providerName string) bool {
+	return providerName == secretsourcetypes.ProviderInfisical
 }
 
-func sameConnectionInternal(source *SecretSource, cfg infisical.Config) bool {
-	siteURL, err := normalizeSiteURLInternal(cfg.SiteURL)
-	if err != nil {
-		return false
+// normalizeSettingsInternal validates the settings of one provider and drops
+// any other provider's settings.
+func normalizeSettingsInternal(providerName string, settings secretsourcetypes.SourceSettings) (secretsourcetypes.SourceSettings, error) {
+	var err error
+	var normalized secretsourcetypes.SourceSettings
+	switch providerName {
+	case secretsourcetypes.ProviderInfisical:
+		normalized.Infisical, err = infisical.NormalizeSettings(settings.Infisical)
+	case secretsourcetypes.ProviderBitwarden:
+		normalized.Bitwarden, err = bitwarden.NormalizeSettings(settings.Bitwarden)
+	default:
+		err = fmt.Errorf("unknown provider %q; use %s or %s", providerName, secretsourcetypes.ProviderInfisical, secretsourcetypes.ProviderBitwarden)
 	}
-	return siteURL == source.SiteURL &&
-		strings.TrimSpace(cfg.ClientID) == source.ClientID &&
-		strings.TrimSpace(cfg.OrganizationSlug) == source.OrganizationSlug
+	if err != nil {
+		return secretsourcetypes.SourceSettings{}, common.Classify(common.ErrSecretSourceInvalid, err)
+	}
+	return normalized, nil
+}
+
+// normalizeTargetInternal validates the target for the source's provider and
+// drops any other provider's target.
+func normalizeTargetInternal(providerName string, target secretsourcetypes.BindingTarget) (secretsourcetypes.BindingTarget, error) {
+	var err error
+	var normalized secretsourcetypes.BindingTarget
+	switch providerName {
+	case secretsourcetypes.ProviderInfisical:
+		normalized.Infisical, err = infisical.NormalizeTarget(target.Infisical)
+	case secretsourcetypes.ProviderBitwarden:
+		normalized.Bitwarden, err = bitwarden.NormalizeTarget(target.Bitwarden)
+	default:
+		err = fmt.Errorf("unknown provider %q", providerName)
+	}
+	if err != nil {
+		return secretsourcetypes.BindingTarget{}, common.Classify(common.ErrSecretBindingInvalid, err)
+	}
+	return normalized, nil
+}
+
+func describeTargetInternal(binding *ProjectSecretBinding) string {
+	switch {
+	case binding.Target.Infisical != nil:
+		return infisical.Describe(binding.Target.Infisical)
+	case binding.Target.Bitwarden != nil:
+		return bitwarden.Describe(binding.Target.Bitwarden)
+	default:
+		return "an unknown target"
+	}
+}
+
+func sameTargetInternal(a, b secretsourcetypes.BindingTarget) bool {
+	left, leftErr := json.Marshal(a)
+	right, rightErr := json.Marshal(b)
+	return leftErr == nil && rightErr == nil && string(left) == string(right)
+}
+
+// connectionFingerprintInternal identifies everything a provider connection
+// depends on: provider, settings, and the stored credential.
+func connectionFingerprintInternal(source *SecretSource) string {
+	settings, err := json.Marshal(source.Settings)
+	if err != nil {
+		settings = nil
+	}
+	return source.Provider + "\x00" + string(settings) + "\x00" + source.Credential
+}
+
+func decryptCredentialInternal(ciphertext string) (string, error) {
+	if ciphertext == "" {
+		return "", nil
+	}
+	plain, err := crypto.Decrypt(ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt stored credential: %w", err)
+	}
+	return plain, nil
 }
 
 func newHashSaltInternal() (string, error) {
@@ -758,38 +868,36 @@ func overriddenKeysInternal(ctx context.Context, project ProjectRef, keys []stri
 
 func sourceToDTOInternal(source *SecretSource, bindingCount int) secretsourcetypes.Source {
 	return secretsourcetypes.Source{
-		ID:               source.ID,
-		Name:             source.Name,
-		Provider:         source.Provider,
-		SiteURL:          source.SiteURL,
-		ClientID:         source.ClientID,
-		OrganizationSlug: source.OrganizationSlug,
-		HasClientSecret:  source.ClientSecret != "",
-		BindingCount:     bindingCount,
-		LastTestedAt:     source.LastTestedAt,
-		LastTestError:    source.LastTestError,
-		CreatedAt:        source.CreatedAt,
-		UpdatedAt:        source.UpdatedAt,
+		ID:            source.ID,
+		Name:          source.Name,
+		Provider:      source.Provider,
+		Settings:      source.Settings,
+		HasCredential: source.Credential != "",
+		BindingCount:  bindingCount,
+		LastTestedAt:  source.LastTestedAt,
+		LastTestError: source.LastTestError,
+		CreatedAt:     source.CreatedAt,
+		UpdatedAt:     source.UpdatedAt,
 	}
 }
 
 func bindingToDTOInternal(binding *ProjectSecretBinding) secretsourcetypes.Binding {
 	dto := secretsourcetypes.Binding{
-		ProjectID:        binding.ProjectID,
-		SourceID:         binding.SourceID,
-		RemoteProjectID:  binding.RemoteProjectID,
-		Environment:      binding.Environment,
-		SecretPath:       binding.SecretPath,
-		IncludeImports:   binding.IncludeImports,
-		ExpandReferences: binding.ExpandReferences,
-		Required:         binding.Required,
-		Enabled:          binding.Enabled,
-		DeployedAt:       binding.DeployedAt,
-		LastFetchedAt:    binding.LastFetchedAt,
-		LastFetchError:   binding.LastFetchError,
+		ProjectID:      binding.ProjectID,
+		SourceID:       binding.SourceID,
+		Target:         binding.Target,
+		Required:       binding.Required,
+		Enabled:        binding.Enabled,
+		AutoRedeploy:   binding.AutoRedeploy,
+		RedeployNeeded: binding.redeployNeededInternal(),
+		DeployedAt:     binding.DeployedAt,
+		LastFetchedAt:  binding.LastFetchedAt,
+		LastCheckedAt:  binding.LastCheckedAt,
+		LastFetchError: binding.LastFetchError,
 	}
 	if binding.Source != nil {
 		dto.SourceName = binding.Source.Name
+		dto.Provider = binding.Source.Provider
 	}
 	return dto
 }

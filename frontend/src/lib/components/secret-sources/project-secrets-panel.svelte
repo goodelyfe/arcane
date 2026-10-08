@@ -6,30 +6,29 @@
 	import SwitchWithLabel from '#lib/components/form/labeled-switch.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Badge } from '#lib/components/ui/badge/index.js';
-	import { Button } from '#lib/components/ui/button/index.js';
 	import * as Empty from '#lib/components/ui/empty/index.js';
-	import { Input } from '#lib/components/ui/input/index.js';
 	import { Label } from '#lib/components/ui/label/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import {
-		AlertIcon,
-		AlertTriangleIcon,
-		CheckIcon,
-		FolderOpenIcon,
-		LockIcon,
-		RefreshIcon,
-		ShieldCheckIcon
-	} from '#lib/icons/index.js';
+	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, ShieldCheckIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
-	import type { ProjectSecretBinding, ProjectSecretBindingDto, ProjectSecretCheckResult } from '#lib/types/secret-source.js';
+	import type {
+		BitwardenTarget,
+		InfisicalTarget,
+		ProjectSecretBinding,
+		ProjectSecretCheckResult,
+		SecretProvider
+	} from '#lib/types/secret-source.js';
 	import { handleApiResultWithCallbacks } from '#lib/utils/api.js';
 	import { hasPermission } from '#lib/utils/auth.js';
 	import { confirmAndRun } from '#lib/utils/bulk-actions.js';
 	import { formatRelativeTime } from '#lib/utils/formatting.js';
 	import { tryCatch } from '#lib/utils/try-catch.js';
+
+	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
+	import InfisicalTargetFields from './infisical-target-fields.svelte';
 
 	let {
 		environmentId,
@@ -64,83 +63,81 @@
 	// ---- Editor state ----
 	let editing = $state(false);
 	let saving = $state(false);
-	let draft = $state<ProjectSecretBindingDto>(emptyDraft());
+	let sourceId = $state('');
+	let required = $state(true);
+	let enabled = $state(true);
+	let autoRedeploy = $state(false);
+	let infisicalTarget = $state<InfisicalTarget>(emptyInfisicalTarget());
+	let bitwardenTarget = $state<BitwardenTarget>(emptyBitwardenTarget());
 
-	function emptyDraft(): ProjectSecretBindingDto {
-		return {
-			sourceId: '',
-			remoteProjectId: '',
-			environment: '',
-			secretPath: '/',
-			includeImports: true,
-			expandReferences: true,
-			required: true,
-			enabled: true
-		};
+	function emptyInfisicalTarget(): InfisicalTarget {
+		return { projectId: '', environment: '', secretPath: '/', includeImports: true, expandReferences: true };
 	}
 
+	function emptyBitwardenTarget(): BitwardenTarget {
+		return { scope: 'folder', id: '', name: '' };
+	}
+
+	const draftProvider = $derived<SecretProvider | undefined>(sources.find((source) => source.id === sourceId)?.provider);
+
 	function startEditing() {
-		draft = binding
-			? {
-					sourceId: binding.sourceId,
-					remoteProjectId: binding.remoteProjectId,
-					environment: binding.environment,
-					secretPath: binding.secretPath,
-					includeImports: binding.includeImports,
-					expandReferences: binding.expandReferences,
-					required: binding.required,
-					enabled: binding.enabled
-				}
-			: { ...emptyDraft(), sourceId: sources.length === 1 ? (sources[0]?.id ?? '') : '' };
+		sourceId = binding?.sourceId ?? (sources.length === 1 ? (sources[0]?.id ?? '') : '');
+		required = binding?.required ?? true;
+		enabled = binding?.enabled ?? true;
+		autoRedeploy = binding?.autoRedeploy ?? false;
+		infisicalTarget = binding?.target.infisical ? { ...binding.target.infisical } : emptyInfisicalTarget();
+		bitwardenTarget = binding?.target.bitwarden ? { ...binding.target.bitwarden } : emptyBitwardenTarget();
 		editing = true;
 	}
 
-	// The Infisical project list fills the pickers. Identities without
-	// permission to list projects fall back to typing the IDs.
-	const activeSourceId = $derived(editing ? draft.sourceId : (binding?.sourceId ?? ''));
-	const remoteProjectsQuery = createQuery(() => ({
-		queryKey: queryKeys.secretSources.remoteProjects(activeSourceId),
-		queryFn: () => secretSourceService.listRemoteProjects(activeSourceId),
-		enabled: !!activeSourceId && canListSources,
-		retry: false
-	}));
-	const remoteProjects = $derived(remoteProjectsQuery.data ?? []);
-	const manualEntry = $derived(remoteProjectsQuery.isError || (remoteProjectsQuery.isSuccess && remoteProjects.length === 0));
-	const selectedRemoteProject = $derived(remoteProjects.find((project) => project.id === draft.remoteProjectId));
-	const boundRemoteProject = $derived(remoteProjects.find((project) => project.id === binding?.remoteProjectId));
+	function selectSource(value: string) {
+		sourceId = value;
+		infisicalTarget = emptyInfisicalTarget();
+		bitwardenTarget = emptyBitwardenTarget();
+	}
 
-	const foldersQuery = createQuery(() => ({
-		queryKey: queryKeys.secretSources.remoteFolders(
-			draft.sourceId,
-			draft.remoteProjectId,
-			draft.environment,
-			draft.secretPath ?? '/'
-		),
-		queryFn: () =>
-			secretSourceService.listRemoteFolders(draft.sourceId, draft.remoteProjectId, draft.environment, draft.secretPath ?? '/'),
-		enabled: editing && !!draft.sourceId && !!draft.remoteProjectId && !!draft.environment,
+	const draftValid = $derived.by(() => {
+		if (!sourceId) return false;
+		if (draftProvider === 'infisical') return !!infisicalTarget.projectId.trim() && !!infisicalTarget.environment.trim();
+		if (draftProvider === 'bitwarden') return !!bitwardenTarget.id;
+		return false;
+	});
+
+	// Shows the Infisical project name instead of its ID in the summary.
+	const boundProjectsQuery = createQuery(() => ({
+		queryKey: queryKeys.secretSources.browse(binding?.sourceId ?? '', 'projects'),
+		queryFn: () => secretSourceService.browse(binding?.sourceId ?? '', { kind: 'projects' }),
+		enabled: !editing && binding?.provider === 'infisical' && canListSources,
 		retry: false
 	}));
 
-	function normalizePath(path: string): string {
-		const trimmed = path.trim().replace(/^\/+|\/+$/g, '');
-		return trimmed ? `/${trimmed}` : '/';
+	function describeTarget(current: ProjectSecretBinding): string {
+		const infisical = current.target.infisical;
+		if (infisical) {
+			const projectName = boundProjectsQuery.data?.find((project) => project.id === infisical.projectId)?.name;
+			return `${projectName ?? infisical.projectId} · ${infisical.environment} · ${infisical.secretPath}`;
+		}
+		const bitwarden = current.target.bitwarden;
+		if (bitwarden) {
+			return `${scopeLabel(bitwarden.scope)} · ${bitwarden.name || bitwarden.id}`;
+		}
+		return '';
 	}
 
-	function enterFolder(folder: string) {
-		const base = normalizePath(draft.secretPath ?? '/');
-		draft.secretPath = base === '/' ? `/${folder}` : `${base}/${folder}`;
+	function scopeLabel(scope: BitwardenTarget['scope']): string {
+		switch (scope) {
+			case 'collection':
+				return m.bitwarden_scope_collection();
+			case 'item':
+				return m.bitwarden_scope_item();
+			default:
+				return m.bitwarden_scope_folder();
+		}
 	}
 
-	function leaveFolder() {
-		const parts = normalizePath(draft.secretPath ?? '/')
-			.split('/')
-			.filter(Boolean);
-		parts.pop();
-		draft.secretPath = parts.length ? `/${parts.join('/')}` : '/';
+	function providerLabel(provider: SecretProvider | undefined): string {
+		return provider === 'bitwarden' ? m.secret_sources_provider_bitwarden() : m.secret_sources_provider_infisical();
 	}
-
-	const draftValid = $derived(!!draft.sourceId && !!draft.remoteProjectId.trim() && !!draft.environment.trim());
 
 	async function invalidateBinding() {
 		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.binding(environmentId, projectId) });
@@ -152,8 +149,11 @@
 		await handleApiResultWithCallbacks({
 			result: await tryCatch(
 				secretSourceService.saveBinding(environmentId, projectId, {
-					...draft,
-					secretPath: normalizePath(draft.secretPath ?? '/')
+					sourceId,
+					target: draftProvider === 'bitwarden' ? { bitwarden: bitwardenTarget } : { infisical: infisicalTarget },
+					required,
+					enabled,
+					autoRedeploy
 				})
 			),
 			message: m.project_secrets_save_failed(),
@@ -258,7 +258,7 @@
 			</div>
 			<div class="min-w-0 flex-1 space-y-1">
 				<div class="flex flex-wrap items-center gap-2">
-					<h3 class="text-base font-semibold">{m.project_secrets_title()}</h3>
+					<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(current.provider) })}</h3>
 					{#if !current.enabled}
 						<Badge variant="gray" size="sm">{m.project_secrets_disabled()}</Badge>
 					{:else if current.required}
@@ -266,15 +266,24 @@
 					{:else}
 						<Badge variant="amber" size="sm">{m.project_secrets_optional()}</Badge>
 					{/if}
+					{#if current.autoRedeploy}
+						<Badge variant="violet" size="sm">{m.project_secrets_auto_redeploy()}</Badge>
+					{/if}
+					{#if current.redeployNeeded}
+						<Badge variant="amber" size="sm"><AlertTriangleIcon class="size-3" />{m.project_secrets_redeploy_needed()}</Badge>
+					{/if}
 				</div>
 				<p class="truncate font-mono text-xs text-muted-foreground">
-					{current.sourceName} · {boundRemoteProject?.name ?? current.remoteProjectId} · {current.environment} · {current.secretPath}
+					{current.sourceName} · {describeTarget(current)}
 				</p>
 				<p class="text-xs text-muted-foreground">
 					{#if current.lastFetchedAt}
 						{m.project_secrets_last_fetched({ time: formatRelativeTime(current.lastFetchedAt) })}
 					{:else}
 						{m.project_secrets_never_fetched()}
+					{/if}
+					{#if current.lastCheckedAt}
+						· {m.project_secrets_last_checked({ time: formatRelativeTime(current.lastCheckedAt) })}
 					{/if}
 				</p>
 			</div>
@@ -393,115 +402,35 @@
 			void save();
 		}}
 	>
-		<h3 class="text-base font-semibold">{m.project_secrets_title()}</h3>
+		<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(draftProvider) })}</h3>
 
 		<div class="space-y-2">
 			<Label for="secret-source">{m.project_secrets_source()}</Label>
-			<Select.Root
-				type="single"
-				value={draft.sourceId}
-				onValueChange={(value) => {
-					draft = { ...draft, sourceId: value, remoteProjectId: '', environment: '', secretPath: '/' };
-				}}
-			>
+			<Select.Root type="single" value={sourceId} onValueChange={selectSource}>
 				<Select.Trigger id="secret-source" class="w-full">
-					<span>{sources.find((source) => source.id === draft.sourceId)?.name ?? m.project_secrets_select_source()}</span>
+					<span>{sources.find((source) => source.id === sourceId)?.name ?? m.project_secrets_select_source()}</span>
 				</Select.Trigger>
 				<Select.Content>
 					{#each sources as source (source.id)}
-						<Select.Item value={source.id}>{source.name}</Select.Item>
+						<Select.Item value={source.id}>
+							<div class="flex flex-col">
+								<span>{source.name}</span>
+								<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>
+							</div>
+						</Select.Item>
 					{/each}
 				</Select.Content>
 			</Select.Root>
 		</div>
 
-		{#if draft.sourceId}
-			{#if remoteProjectsQuery.isPending}
-				<div class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner class="size-4" />{m.common_loading()}</div>
-			{:else if manualEntry}
-				<Alert.Root variant="info" icon={AlertIcon} description={m.project_secrets_enter_ids_description()} />
-				<div class="grid gap-4 sm:grid-cols-2">
-					<div class="space-y-2">
-						<Label for="secret-remote-project">{m.project_secrets_infisical_project_id()}</Label>
-						<Input id="secret-remote-project" mono bind:value={draft.remoteProjectId} />
-					</div>
-					<div class="space-y-2">
-						<Label for="secret-environment">{m.project_secrets_environment_slug()}</Label>
-						<Input id="secret-environment" mono placeholder="prod" bind:value={draft.environment} />
-					</div>
-				</div>
-			{:else}
-				<div class="grid gap-4 sm:grid-cols-2">
-					<div class="space-y-2">
-						<Label for="secret-remote-project">{m.project_secrets_infisical_project()}</Label>
-						<Select.Root
-							type="single"
-							value={draft.remoteProjectId}
-							onValueChange={(value) => {
-								const project = remoteProjects.find((candidate) => candidate.id === value);
-								const environment = project?.environments.length === 1 ? (project.environments[0]?.slug ?? '') : '';
-								draft = { ...draft, remoteProjectId: value, environment, secretPath: '/' };
-							}}
-						>
-							<Select.Trigger id="secret-remote-project" class="w-full">
-								<span>{selectedRemoteProject?.name ?? m.project_secrets_select_project()}</span>
-							</Select.Trigger>
-							<Select.Content>
-								{#each remoteProjects as project (project.id)}
-									<Select.Item value={project.id}>{project.name}</Select.Item>
-								{/each}
-							</Select.Content>
-						</Select.Root>
-					</div>
-					<div class="space-y-2">
-						<Label for="secret-environment">{m.project_secrets_environment()}</Label>
-						<Select.Root
-							type="single"
-							value={draft.environment}
-							disabled={!selectedRemoteProject}
-							onValueChange={(value) => {
-								draft = { ...draft, environment: value, secretPath: '/' };
-							}}
-						>
-							<Select.Trigger id="secret-environment" class="w-full">
-								<span>
-									{selectedRemoteProject?.environments.find((environment) => environment.slug === draft.environment)?.name ??
-										m.project_secrets_select_environment()}
-								</span>
-							</Select.Trigger>
-							<Select.Content>
-								{#each selectedRemoteProject?.environments ?? [] as environment (environment.slug)}
-									<Select.Item value={environment.slug}>{environment.name}</Select.Item>
-								{/each}
-							</Select.Content>
-						</Select.Root>
-					</div>
-				</div>
-			{/if}
-
-			{#if draft.remoteProjectId && draft.environment}
-				<div class="space-y-2">
-					<Label for="secret-path">{m.project_secrets_path()}</Label>
-					<Input id="secret-path" mono bind:value={draft.secretPath} />
-					<div class="flex flex-wrap items-center gap-1.5">
-						{#if normalizePath(draft.secretPath ?? '/') !== '/'}
-							<Button type="button" size="sm" variant="ghost" class="h-7" onclick={leaveFolder}
-								><span class="font-mono">..</span></Button
-							>
-						{/if}
-						{#if foldersQuery.isPending}
-							<Spinner class="size-4" />
-						{:else}
-							{#each foldersQuery.data ?? [] as folder (folder)}
-								<Button type="button" size="sm" variant="outline" class="h-7" onclick={() => enterFolder(folder)}>
-									<FolderOpenIcon class="size-3.5" />
-									<span class="font-mono">{folder}</span>
-								</Button>
-							{/each}
-						{/if}
-					</div>
-				</div>
-			{/if}
+		{#if sourceId && draftProvider === 'infisical'}
+			{#key sourceId}
+				<InfisicalTargetFields {sourceId} bind:target={infisicalTarget} />
+			{/key}
+		{:else if sourceId && draftProvider === 'bitwarden'}
+			{#key sourceId}
+				<BitwardenTargetFields {sourceId} bind:target={bitwardenTarget} />
+			{/key}
 		{/if}
 
 		<div class="grid gap-3 border-t border-border/50 pt-4">
@@ -509,19 +438,19 @@
 				id="secret-required"
 				label={m.project_secrets_required()}
 				description={m.project_secrets_required_description()}
-				bind:checked={draft.required}
+				bind:checked={required}
 			/>
 			<SwitchWithLabel
 				id="secret-enabled"
 				label={m.common_enabled()}
 				description={m.project_secrets_enabled_description()}
-				bind:checked={draft.enabled}
+				bind:checked={enabled}
 			/>
-			<SwitchWithLabel id="secret-imports" label={m.project_secrets_include_imports()} bind:checked={draft.includeImports} />
 			<SwitchWithLabel
-				id="secret-references"
-				label={m.project_secrets_expand_references()}
-				bind:checked={draft.expandReferences}
+				id="secret-auto-redeploy"
+				label={m.project_secrets_auto_redeploy()}
+				description={m.project_secrets_auto_redeploy_description()}
+				bind:checked={autoRedeploy}
 			/>
 		</div>
 

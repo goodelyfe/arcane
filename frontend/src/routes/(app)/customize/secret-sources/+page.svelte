@@ -71,12 +71,7 @@
 	}
 
 	function storedTestRequest(source: SecretSource) {
-		return {
-			sourceId: source.id,
-			siteUrl: source.siteUrl,
-			clientId: source.clientId,
-			organizationSlug: source.organizationSlug ?? ''
-		};
+		return { sourceId: source.id, provider: source.provider, settings: source.settings };
 	}
 
 	async function recordConnectionTest(source: SecretSource) {
@@ -90,9 +85,7 @@
 			message: m.secret_sources_test_failed(),
 			onSuccess: async (outcome) => {
 				if (outcome.ok) {
-					toast.success(
-						outcome.canListProjects ? m.secret_sources_test_success({ count: outcome.projectsVisible }) : outcome.message
-					);
+					toast.success(outcome.message);
 				} else {
 					toast.error(m.secret_sources_test_failed(), { description: outcome.message });
 				}

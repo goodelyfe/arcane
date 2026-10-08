@@ -183,6 +183,7 @@ var JobOptions = fx.Options(
 		scheduler.NewUploadSessionsCleanupJob,
 		scheduler.NewGitCloneCleanupJob,
 		scheduler.NewBackupRepositoryPruneJob,
+		scheduler.NewSecretDriftCheckJob,
 		fx.Annotate(scheduler.NewUpgradeLogCleanupJob, fx.ResultTags(`name:"upgrade-log-cleanup"`)),
 		scheduler.NewApnsOutboxJob,
 	),

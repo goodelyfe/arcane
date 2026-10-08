@@ -1,114 +1,178 @@
-// Package secretsource holds the API contracts for external secret managers
-// (Infisical) and the per-project bindings that pull secrets at deploy time.
+// Package secretsource holds the API contracts for external secret providers
+// and the per-project bindings that pull secrets at deploy time.
 package secretsource
 
 import "time"
 
-// ProviderInfisical is the only provider supported today.
-const ProviderInfisical = "infisical"
+// Supported providers.
+const (
+	ProviderInfisical = "infisical"
+	ProviderBitwarden = "bitwarden"
+)
 
-// Source is a saved connection to an external secret manager. The client
-// secret is write-only and never returned.
+// Bitwarden binding scopes.
+const (
+	// BitwardenScopeFolder maps every item in a folder: item name is the key,
+	// the login password (or a secure note's text) is the value.
+	BitwardenScopeFolder = "folder"
+	// BitwardenScopeCollection does the same for an organization collection.
+	BitwardenScopeCollection = "collection"
+	// BitwardenScopeItem maps the custom fields of one item to keys and values.
+	BitwardenScopeItem = "item"
+)
+
+// InfisicalSettings connects to Infisical with a Universal Auth machine
+// identity. The client secret is the source's credential.
+type InfisicalSettings struct {
+	SiteURL          string `json:"siteUrl"`
+	ClientID         string `json:"clientId"`
+	OrganizationSlug string `json:"organizationSlug,omitempty"`
+}
+
+// BitwardenSettings points at a Bitwarden CLI `bw serve` endpoint, which works
+// with both Bitwarden and Vaultwarden. The CLI holds the vault session, so this
+// provider has no credential of its own.
+type BitwardenSettings struct {
+	ServeURL string `json:"serveUrl"`
+}
+
+// SourceSettings carries the non-secret settings of exactly one provider.
+type SourceSettings struct {
+	Infisical *InfisicalSettings `json:"infisical,omitempty"`
+	Bitwarden *BitwardenSettings `json:"bitwarden,omitempty"`
+}
+
+// Source is a saved connection to an external secret provider. The
+// credential is write-only and never returned.
 type Source struct {
-	ID               string     `json:"id"`
-	Name             string     `json:"name"`
-	Provider         string     `json:"provider"`
-	SiteURL          string     `json:"siteUrl"`
-	ClientID         string     `json:"clientId"`
-	OrganizationSlug string     `json:"organizationSlug,omitempty"`
-	HasClientSecret  bool       `json:"hasClientSecret"`
-	BindingCount     int        `json:"bindingCount"`
-	LastTestedAt     *time.Time `json:"lastTestedAt,omitempty"`
-	LastTestError    *string    `json:"lastTestError,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	UpdatedAt        *time.Time `json:"updatedAt,omitempty"`
+	ID            string         `json:"id"`
+	Name          string         `json:"name"`
+	Provider      string         `json:"provider"`
+	Settings      SourceSettings `json:"settings"`
+	HasCredential bool           `json:"hasCredential"`
+	BindingCount  int            `json:"bindingCount"`
+	LastTestedAt  *time.Time     `json:"lastTestedAt,omitempty"`
+	LastTestError *string        `json:"lastTestError,omitempty"`
+	CreatedAt     time.Time      `json:"createdAt"`
+	UpdatedAt     *time.Time     `json:"updatedAt,omitempty"`
 }
 
 type CreateSourceRequest struct {
-	Name             string `json:"name"`
-	SiteURL          string `json:"siteUrl,omitempty"`
-	ClientID         string `json:"clientId"`
-	ClientSecret     string `json:"clientSecret"`
-	OrganizationSlug string `json:"organizationSlug,omitempty"`
+	Name       string         `json:"name"`
+	Provider   string         `json:"provider"`
+	Settings   SourceSettings `json:"settings"`
+	Credential string         `json:"credential,omitempty"`
 }
 
 // UpdateSourceRequest updates a source; nil fields keep the current value. A
-// nil or empty ClientSecret keeps the stored secret.
+// nil or empty Credential keeps the stored one. The provider cannot change.
 type UpdateSourceRequest struct {
-	Name             *string `json:"name,omitzero"`
-	SiteURL          *string `json:"siteUrl,omitzero"`
-	ClientID         *string `json:"clientId,omitzero"`
-	ClientSecret     *string `json:"clientSecret,omitzero"`
-	OrganizationSlug *string `json:"organizationSlug,omitzero"`
+	Name       *string         `json:"name,omitzero"`
+	Settings   *SourceSettings `json:"settings,omitzero"`
+	Credential *string         `json:"credential,omitzero"`
 }
 
-// TestSourceRequest tests connection settings without saving them. When
-// SourceID is set and ClientSecret is empty, the stored secret is used and the
-// result is recorded on that source.
+// TestSourceRequest tests settings without saving them. When SourceID is set
+// and Credential is empty, the stored credential is used, and the result is
+// recorded on the source when the tested settings match the stored ones.
 type TestSourceRequest struct {
-	SourceID         string `json:"sourceId,omitempty"`
-	SiteURL          string `json:"siteUrl,omitempty"`
-	ClientID         string `json:"clientId"`
-	ClientSecret     string `json:"clientSecret,omitempty"`
-	OrganizationSlug string `json:"organizationSlug,omitempty"`
+	SourceID   string         `json:"sourceId,omitempty"`
+	Provider   string         `json:"provider"`
+	Settings   SourceSettings `json:"settings"`
+	Credential string         `json:"credential,omitempty"`
 }
 
 type TestSourceResult struct {
-	OK              bool   `json:"ok"`
-	Message         string `json:"message"`
-	TokenTTLSeconds int64  `json:"tokenTtlSeconds,omitempty"`
-	ProjectsVisible int    `json:"projectsVisible"`
-	CanListProjects bool   `json:"canListProjects"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+	// CanBrowse reports whether the pickers can list targets; when false the
+	// UI asks for IDs by hand.
+	CanBrowse    bool `json:"canBrowse"`
+	VisibleCount int  `json:"visibleCount"`
 }
 
-type RemoteEnvironment struct {
-	Name string `json:"name"`
-	Slug string `json:"slug"`
+// Browse kinds per provider.
+const (
+	BrowseInfisicalProjects    = "projects"
+	BrowseInfisicalFolders     = "folders"
+	BrowseBitwardenFolders     = "folders"
+	BrowseBitwardenCollections = "collections"
+	BrowseBitwardenItems       = "items"
+)
+
+// BrowseQuery selects what to list from a source for the binding pickers.
+type BrowseQuery struct {
+	Kind        string `json:"kind"`
+	ProjectID   string `json:"projectId,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	Path        string `json:"path,omitempty"`
 }
 
-// RemoteProject is a project in the secret manager, used to fill pickers.
-type RemoteProject struct {
-	ID           string              `json:"id"`
-	Name         string              `json:"name"`
-	Slug         string              `json:"slug"`
-	Environments []RemoteEnvironment `json:"environments"`
+// BrowseItem is one pickable target. Options carries nested choices, such as
+// the environments of an Infisical project.
+type BrowseItem struct {
+	ID      string       `json:"id"`
+	Name    string       `json:"name"`
+	Detail  string       `json:"detail,omitempty"`
+	Options []BrowseItem `json:"options,omitempty"`
 }
 
-// Binding connects one Arcane project to one secret path.
+// InfisicalTarget selects one environment path of one Infisical project.
+type InfisicalTarget struct {
+	ProjectID        string `json:"projectId"`
+	Environment      string `json:"environment"`
+	SecretPath       string `json:"secretPath"`
+	IncludeImports   bool   `json:"includeImports"`
+	ExpandReferences bool   `json:"expandReferences"`
+}
+
+// BitwardenTarget selects a folder, a collection, or a single item.
+type BitwardenTarget struct {
+	Scope string `json:"scope"`
+	ID    string `json:"id"`
+	// Name is the folder, collection, or item name at bind time, for display.
+	Name string `json:"name,omitempty"`
+}
+
+// BindingTarget carries the target of exactly one provider.
+type BindingTarget struct {
+	Infisical *InfisicalTarget `json:"infisical,omitempty"`
+	Bitwarden *BitwardenTarget `json:"bitwarden,omitempty"`
+}
+
+// Binding connects one Arcane project to one target in a secret source.
 type Binding struct {
-	ProjectID        string     `json:"projectId"`
-	SourceID         string     `json:"sourceId"`
-	SourceName       string     `json:"sourceName"`
-	RemoteProjectID  string     `json:"remoteProjectId"`
-	Environment      string     `json:"environment"`
-	SecretPath       string     `json:"secretPath"`
-	IncludeImports   bool       `json:"includeImports"`
-	ExpandReferences bool       `json:"expandReferences"`
-	Required         bool       `json:"required"`
-	Enabled          bool       `json:"enabled"`
-	DeployedAt       *time.Time `json:"deployedAt,omitempty"`
-	LastFetchedAt    *time.Time `json:"lastFetchedAt,omitempty"`
-	LastFetchError   *string    `json:"lastFetchError,omitempty"`
+	ProjectID      string        `json:"projectId"`
+	SourceID       string        `json:"sourceId"`
+	SourceName     string        `json:"sourceName"`
+	Provider       string        `json:"provider"`
+	Target         BindingTarget `json:"target"`
+	Required       bool          `json:"required"`
+	Enabled        bool          `json:"enabled"`
+	AutoRedeploy   bool          `json:"autoRedeploy"`
+	RedeployNeeded bool          `json:"redeployNeeded"`
+	DeployedAt     *time.Time    `json:"deployedAt,omitempty"`
+	LastFetchedAt  *time.Time    `json:"lastFetchedAt,omitempty"`
+	LastCheckedAt  *time.Time    `json:"lastCheckedAt,omitempty"`
+	LastFetchError *string       `json:"lastFetchError,omitempty"`
 }
 
 type UpsertBindingRequest struct {
-	SourceID         string `json:"sourceId"`
-	RemoteProjectID  string `json:"remoteProjectId"`
-	Environment      string `json:"environment"`
-	SecretPath       string `json:"secretPath,omitempty"`
-	IncludeImports   bool   `json:"includeImports"`
-	ExpandReferences bool   `json:"expandReferences"`
-	Required         bool   `json:"required"`
-	Enabled          bool   `json:"enabled"`
+	SourceID     string        `json:"sourceId"`
+	Target       BindingTarget `json:"target"`
+	Required     bool          `json:"required"`
+	Enabled      bool          `json:"enabled"`
+	AutoRedeploy bool          `json:"autoRedeploy"`
 }
 
 // CheckResult reports what a fetch would deliver, without any secret values.
 type CheckResult struct {
 	Keys []string `json:"keys"`
 	// OverriddenKeys are keys also defined in the project's .env or
-	// .env.global; the Infisical value wins at deploy.
+	// .env.global; the provider's value wins at deploy.
 	OverriddenKeys []string `json:"overriddenKeys"`
-	// InvalidKeys cannot be used as environment variable names and are skipped.
+	// InvalidKeys cannot be used as environment variable names, or have no
+	// usable value, and are skipped.
 	InvalidKeys []string `json:"invalidKeys"`
 	// RedeployNeeded is true when the secrets changed since the last deploy.
 	RedeployNeeded bool       `json:"redeployNeeded"`
