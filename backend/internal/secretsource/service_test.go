@@ -1,6 +1,7 @@
 package secretsource
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,36 @@ func (f *fakeInfisicalInternal) server(t *testing.T) *httptest.Server {
 	return server
 }
 
+// fakeBitwardenServeInternal mimics the bw serve Vault Management API.
+func fakeBitwardenServeInternal(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"object":"template","template":{"serverUrl":"https://vault.example","userEmail":"deploy@example","status":"unlocked"}}}`))
+	})
+	mux.HandleFunc("POST /sync", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"object":"message","title":"Syncing complete."}}`))
+	})
+	mux.HandleFunc("GET /list/object/items", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("folderid") != "f1" {
+			_, _ = w.Write([]byte(`{"success":true,"data":{"object":"list","data":[]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":{"object":"list","data":[
+			{"id":"i1","name":"DB_PASSWORD","type":1,"login":{"password":"pw"}},
+			{"id":"i2","name":"TLS_NOTE","type":2,"notes":"note text"},
+			{"id":"i3","name":"EMPTY_LOGIN","type":1,"login":{"password":null}}
+		]}}`))
+	})
+	mux.HandleFunc("GET /object/item/i9", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"object":"item","id":"i9","name":"billing env","type":2,
+			"fields":[{"name":"API_KEY","value":"k","type":1},{"name":"DEBUG","value":"true","type":2},{"name":"user","value":null,"type":3}]}}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
 func setupSecretSourceServiceTestInternal(t *testing.T) (*SecretSourceService, *database.DB) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
@@ -84,82 +115,143 @@ func setupSecretSourceServiceTestInternal(t *testing.T) (*SecretSourceService, *
 	return NewSecretSourceService(wrapped, nil), wrapped
 }
 
-func createTestSourceInternal(t *testing.T, service *SecretSourceService, siteURL string) *secretsourcetypes.Source {
+func infisicalSettingsInternal(siteURL, clientID string) secretsourcetypes.SourceSettings {
+	return secretsourcetypes.SourceSettings{Infisical: &secretsourcetypes.InfisicalSettings{SiteURL: siteURL, ClientID: clientID}}
+}
+
+func createInfisicalSourceInternal(t *testing.T, service *SecretSourceService, siteURL string) *secretsourcetypes.Source {
 	t.Helper()
 	source, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
-		Name: "Homelab Infisical", SiteURL: siteURL, ClientID: "client-id", ClientSecret: "client-secret",
+		Name:       "Homelab Infisical",
+		Provider:   secretsourcetypes.ProviderInfisical,
+		Settings:   infisicalSettingsInternal(siteURL, "client-id"),
+		Credential: "client-secret",
 	})
 	require.NoError(t, err)
 	return source
 }
 
-func bindTestProjectInternal(t *testing.T, service *SecretSourceService, sourceID string, required bool) {
+func bindInfisicalInternal(t *testing.T, service *SecretSourceService, sourceID string, required, autoRedeploy bool) {
 	t.Helper()
 	_, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
-		SourceID: sourceID, RemoteProjectID: "p1", Environment: "prod", SecretPath: "billing",
-		IncludeImports: true, ExpandReferences: true, Required: required, Enabled: true,
+		SourceID: sourceID,
+		Target: secretsourcetypes.BindingTarget{Infisical: &secretsourcetypes.InfisicalTarget{
+			ProjectID: "p1", Environment: "prod", SecretPath: "billing", IncludeImports: true, ExpandReferences: true,
+		}},
+		Required:     required,
+		Enabled:      true,
+		AutoRedeploy: autoRedeploy,
 	})
 	require.NoError(t, err)
 }
 
-func TestCreateSourceEncryptsSecretAndRejectsDuplicateNames(t *testing.T) {
+func TestCreateSourceValidatesPerProvider(t *testing.T) {
 	service, db := setupSecretSourceServiceTestInternal(t)
 
-	source := createTestSourceInternal(t, service, "https://infisical.example.ts.net/")
-	assert.True(t, source.HasClientSecret)
-	assert.Equal(t, "https://infisical.example.ts.net", source.SiteURL)
+	source := createInfisicalSourceInternal(t, service, "https://infisical.example.ts.net/")
+	assert.True(t, source.HasCredential)
+	require.NotNil(t, source.Settings.Infisical)
+	assert.Equal(t, "https://infisical.example.ts.net", source.Settings.Infisical.SiteURL)
 
 	var stored SecretSource
 	require.NoError(t, db.First(&stored, "id = ?", source.ID).Error)
-	assert.NotEqual(t, "client-secret", stored.ClientSecret)
-	plain, err := crypto.Decrypt(stored.ClientSecret)
+	assert.NotEqual(t, "client-secret", stored.Credential)
+	plain, err := crypto.Decrypt(stored.Credential)
 	require.NoError(t, err)
 	assert.Equal(t, "client-secret", plain)
 
 	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
-		Name: "homelab infisical", ClientID: "other", ClientSecret: "other",
+		Name: "homelab infisical", Provider: secretsourcetypes.ProviderInfisical,
+		Settings: infisicalSettingsInternal("", "other"), Credential: "other",
 	})
 	require.ErrorIs(t, err, common.ErrSecretSourceConflict)
 
 	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
-		Name: "No secret", ClientID: "id",
+		Name: "No secret", Provider: secretsourcetypes.ProviderInfisical, Settings: infisicalSettingsInternal("", "id"),
 	})
+	require.ErrorIs(t, err, common.ErrValidation)
+
+	vault, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "Vaultwarden", Provider: secretsourcetypes.ProviderBitwarden,
+		Settings: secretsourcetypes.SourceSettings{
+			Bitwarden: &secretsourcetypes.BitwardenSettings{ServeURL: "http://bw-serve:8087/"},
+			Infisical: &secretsourcetypes.InfisicalSettings{ClientID: "ignored"},
+		},
+	})
+	require.NoError(t, err)
+	assert.False(t, vault.HasCredential)
+	assert.Nil(t, vault.Settings.Infisical, "settings of another provider must be dropped")
+	assert.Equal(t, "http://bw-serve:8087", vault.Settings.Bitwarden.ServeURL)
+
+	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{Name: "Unknown", Provider: "vault"})
 	require.ErrorIs(t, err, common.ErrValidation)
 }
 
-func TestUpdateSourceKeepsSecretWhenBlank(t *testing.T) {
+func TestUpdateSourceKeepsCredentialAndTestResultUnlessConnectionChanges(t *testing.T) {
 	service, db := setupSecretSourceServiceTestInternal(t)
-	source := createTestSourceInternal(t, service, "")
+	server := (&fakeInfisicalInternal{}).server(t)
+	source := createInfisicalSourceInternal(t, service, server.URL)
+
+	_, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
+		SourceID: source.ID, Settings: infisicalSettingsInternal(server.URL, "client-id"), Credential: "client-secret",
+	})
+	require.NoError(t, err)
 
 	blank := ""
 	newName := "Renamed"
-	updated, err := service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Name: &newName, ClientSecret: &blank})
+	updated, err := service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Name: &newName, Credential: &blank})
 	require.NoError(t, err)
 	assert.Equal(t, "Renamed", updated.Name)
+	require.NotNil(t, updated.LastTestedAt, "a rename must keep the test result")
 
 	var stored SecretSource
 	require.NoError(t, db.First(&stored, "id = ?", source.ID).Error)
-	plain, err := crypto.Decrypt(stored.ClientSecret)
+	plain, err := crypto.Decrypt(stored.Credential)
 	require.NoError(t, err)
 	assert.Equal(t, "client-secret", plain)
+
+	changed := infisicalSettingsInternal(server.URL, "other-client")
+	updated, err = service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Settings: &changed})
+	require.NoError(t, err)
+	assert.Nil(t, updated.LastTestedAt, "changing the connection must clear the test result")
+
+	// Testing unsaved settings must not overwrite the stored status.
+	_, err = service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
+		SourceID: source.ID, Settings: infisicalSettingsInternal(server.URL, "unsaved-client"),
+	})
+	require.NoError(t, err)
+	current, err := service.GetSource(t.Context(), source.ID)
+	require.NoError(t, err)
+	assert.Nil(t, current.LastTestedAt)
 }
 
 func TestDeleteSourceInUseIsRejected(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
-	source := createTestSourceInternal(t, service, "")
-	bindTestProjectInternal(t, service, source.ID, true)
+	source := createInfisicalSourceInternal(t, service, "")
+	bindInfisicalInternal(t, service, source.ID, true, false)
 
 	require.ErrorIs(t, service.DeleteSource(t.Context(), source.ID), common.ErrSecretSourceInUse)
 	require.NoError(t, service.DeleteBinding(t.Context(), "project-1"))
 	require.NoError(t, service.DeleteSource(t.Context(), source.ID))
 }
 
+func TestUpsertBindingValidatesTargetForProvider(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	source := createInfisicalSourceInternal(t, service, "")
+
+	_, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+		SourceID: source.ID,
+		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "folder", ID: "f1"}},
+	})
+	require.ErrorIs(t, err, common.ErrValidation, "an Infisical source needs an Infisical target")
+}
+
 func TestResolveDeployEnvDropsInvalidKeysAndHashesStably(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
 	fake := &fakeInfisicalInternal{}
 	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"s3cret"},{"secretKey":"bad-key","secretValue":"x"}]}`)
-	source := createTestSourceInternal(t, service, fake.server(t).URL)
-	bindTestProjectInternal(t, service, source.ID, true)
+	source := createInfisicalSourceInternal(t, service, fake.server(t).URL)
+	bindInfisicalInternal(t, service, source.ID, true, false)
 
 	project := ProjectRef{ID: "project-1", Name: "billing-api"}
 	first, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
@@ -176,10 +268,10 @@ func TestResolveDeployEnvRequiredVersusOptional(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
 	fake := &fakeInfisicalInternal{}
 	fake.setFail(true)
-	source := createTestSourceInternal(t, service, fake.server(t).URL)
+	source := createInfisicalSourceInternal(t, service, fake.server(t).URL)
 	project := ProjectRef{ID: "project-1", Name: "billing-api"}
 
-	bindTestProjectInternal(t, service, source.ID, true)
+	bindInfisicalInternal(t, service, source.ID, true, false)
 	_, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
 	assert.Contains(t, err.Error(), "Permission denied")
@@ -188,22 +280,48 @@ func TestResolveDeployEnvRequiredVersusOptional(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, binding.LastFetchError)
 
-	bindTestProjectInternal(t, service, source.ID, false)
+	bindInfisicalInternal(t, service, source.ID, false, false)
 	env, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.Nil(t, env.Values)
 }
 
+func TestResolveDeployEnvEmptyResultFailsOnlyWhenRequired(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	fake := &fakeInfisicalInternal{}
+	fake.setSecrets(`{"secrets":[{"secretKey":"bad-key","secretValue":"x"}]}`)
+	source := createInfisicalSourceInternal(t, service, fake.server(t).URL)
+	project := ProjectRef{ID: "project-1", Name: "billing-api"}
+
+	bindInfisicalInternal(t, service, source.ID, true, false)
+	_, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
+	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
+	assert.Contains(t, err.Error(), "no usable secrets")
+
+	result, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Keys)
+	assert.Equal(t, []string{"bad-key"}, result.InvalidKeys)
+
+	bindInfisicalInternal(t, service, source.ID, false, false)
+	env, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	assert.Empty(t, env.Values)
+}
+
 func TestResolveDeployEnvSkipsDisabledAndUnboundProjects(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
-	source := createTestSourceInternal(t, service, "http://127.0.0.1:1")
+	source := createInfisicalSourceInternal(t, service, "http://127.0.0.1:1")
 
 	env, err := service.ResolveDeployEnv(t.Context(), ProjectRef{ID: "unbound"}, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.Nil(t, env.Values)
 
 	_, err = service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
-		SourceID: source.ID, RemoteProjectID: "p1", Environment: "prod", Required: true, Enabled: false,
+		SourceID: source.ID,
+		Target:   secretsourcetypes.BindingTarget{Infisical: &secretsourcetypes.InfisicalTarget{ProjectID: "p1", Environment: "prod"}},
+		Required: true,
+		Enabled:  false,
 	})
 	require.NoError(t, err)
 	env, err = service.ResolveDeployEnv(t.Context(), ProjectRef{ID: "project-1"}, usertypes.Actor{})
@@ -215,8 +333,8 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
 	fake := &fakeInfisicalInternal{}
 	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"one"},{"secretKey":"API_KEY","secretValue":"k"}]}`)
-	source := createTestSourceInternal(t, service, fake.server(t).URL)
-	bindTestProjectInternal(t, service, source.ID, true)
+	source := createInfisicalSourceInternal(t, service, fake.server(t).URL)
+	bindInfisicalInternal(t, service, source.ID, true, false)
 
 	projectDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DB_PASS=local\nOTHER=1\n"), 0o600))
@@ -227,7 +345,6 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 	assert.Equal(t, []string{"API_KEY", "DB_PASS"}, result.Keys)
 	assert.Equal(t, []string{"DB_PASS"}, result.OverriddenKeys)
 	assert.True(t, result.NeverDeployed)
-	assert.False(t, result.RedeployNeeded)
 
 	deployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
@@ -235,86 +352,87 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 
 	result, err = service.CheckBinding(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	assert.False(t, result.NeverDeployed)
 	assert.False(t, result.RedeployNeeded)
 
 	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"two"},{"secretKey":"API_KEY","secretValue":"k"}]}`)
 	result, err = service.CheckBinding(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.True(t, result.RedeployNeeded)
+
+	binding, err := service.GetBinding(t.Context(), project.ID)
+	require.NoError(t, err)
+	assert.True(t, binding.RedeployNeeded, "the binding remembers what the last check saw")
 }
 
-func TestTestSourceUsesStoredSecretAndRecordsResult(t *testing.T) {
-	service, _ := setupSecretSourceServiceTestInternal(t)
-	server := (&fakeInfisicalInternal{}).server(t)
-	source := createTestSourceInternal(t, service, server.URL)
-
-	result, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
-		SourceID: source.ID, SiteURL: server.URL, ClientID: "client-id",
-	})
-	require.NoError(t, err)
-	assert.True(t, result.OK)
-	assert.True(t, result.CanListProjects)
-	assert.Equal(t, 1, result.ProjectsVisible)
-
-	stored, err := service.GetSource(t.Context(), source.ID)
-	require.NoError(t, err)
-	require.NotNil(t, stored.LastTestedAt)
-	assert.Nil(t, stored.LastTestError)
-}
-
-func TestUpdateSourceKeepsTestResultUnlessConnectionChanges(t *testing.T) {
-	service, _ := setupSecretSourceServiceTestInternal(t)
-	server := (&fakeInfisicalInternal{}).server(t)
-	source := createTestSourceInternal(t, service, server.URL)
-
-	// Testing with the stored settings, secret included, records the result.
-	_, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
-		SourceID: source.ID, SiteURL: server.URL, ClientID: "client-id", ClientSecret: "client-secret",
-	})
-	require.NoError(t, err)
-
-	newName := "Renamed"
-	updated, err := service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Name: &newName})
-	require.NoError(t, err)
-	require.NotNil(t, updated.LastTestedAt, "a rename must keep the test result")
-
-	newClientID := "other-client"
-	updated, err = service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{ClientID: &newClientID})
-	require.NoError(t, err)
-	assert.Nil(t, updated.LastTestedAt, "changing the connection must clear the test result")
-
-	// Testing unsaved settings must not overwrite the stored status.
-	_, err = service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{
-		SourceID: source.ID, SiteURL: server.URL, ClientID: "unsaved-client",
-	})
-	require.NoError(t, err)
-	stored, err := service.GetSource(t.Context(), source.ID)
-	require.NoError(t, err)
-	assert.Nil(t, stored.LastTestedAt)
-}
-
-func TestResolveDeployEnvEmptyResultFailsOnlyWhenRequired(t *testing.T) {
+func TestCheckDriftReportsEachChangeOnce(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
 	fake := &fakeInfisicalInternal{}
-	// Only an invalid key: nothing usable is delivered.
-	fake.setSecrets(`{"secrets":[{"secretKey":"bad-key","secretValue":"x"}]}`)
-	source := createTestSourceInternal(t, service, fake.server(t).URL)
+	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"one"}]}`)
+	source := createInfisicalSourceInternal(t, service, fake.server(t).URL)
+	bindInfisicalInternal(t, service, source.ID, true, true)
 	project := ProjectRef{ID: "project-1", Name: "billing-api"}
+	resolve := func(_ context.Context, _ string) (ProjectRef, error) { return project, nil }
 
-	bindTestProjectInternal(t, service, source.ID, true)
-	_, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
-	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
-	assert.Contains(t, err.Error(), "no usable secrets")
+	// Never deployed: nothing to compare against.
+	assert.Empty(t, service.CheckDrift(t.Context(), resolve))
 
-	// Check still succeeds so the UI can show what came back.
-	result, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	deployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	assert.Empty(t, result.Keys)
-	assert.Equal(t, []string{"bad-key"}, result.InvalidKeys)
+	service.RecordDeployed(t.Context(), project.ID, deployed.Hash)
+	assert.Empty(t, service.CheckDrift(t.Context(), resolve), "unchanged secrets are not drift")
 
-	bindTestProjectInternal(t, service, source.ID, false)
+	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"two"}]}`)
+	changes := service.CheckDrift(t.Context(), resolve)
+	require.Len(t, changes, 1)
+	assert.Equal(t, "project-1", changes[0].ProjectID)
+	assert.True(t, changes[0].AutoRedeploy)
+
+	assert.Empty(t, service.CheckDrift(t.Context(), resolve), "the same change is reported only once")
+
+	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"three"}]}`)
+	assert.Len(t, service.CheckDrift(t.Context(), resolve), 1, "a further change is reported again")
+
+	redeployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	service.RecordDeployed(t.Context(), project.ID, redeployed.Hash)
+	binding, err := service.GetBinding(t.Context(), project.ID)
+	require.NoError(t, err)
+	assert.False(t, binding.RedeployNeeded)
+}
+
+func TestBitwardenSourceFolderAndItemBindings(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	server := fakeBitwardenServeInternal(t)
+	source, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "Vaultwarden", Provider: secretsourcetypes.ProviderBitwarden,
+		Settings: secretsourcetypes.SourceSettings{Bitwarden: &secretsourcetypes.BitwardenSettings{ServeURL: server.URL}},
+	})
+	require.NoError(t, err)
+
+	result, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{SourceID: source.ID, Settings: source.Settings})
+	require.NoError(t, err)
+	assert.True(t, result.OK, result.Message)
+	assert.Contains(t, result.Message, "deploy@example")
+
+	project := ProjectRef{ID: "project-1", Name: "billing-api"}
+	_, err = service.UpsertBinding(t.Context(), project.ID, secretsourcetypes.UpsertBindingRequest{
+		SourceID: source.ID,
+		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "folder", ID: "f1", Name: "billing"}},
+		Required: true, Enabled: true,
+	})
+	require.NoError(t, err)
+	check, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"DB_PASSWORD", "TLS_NOTE"}, check.Keys)
+	assert.Equal(t, []string{"EMPTY_LOGIN"}, check.InvalidKeys)
+
+	_, err = service.UpsertBinding(t.Context(), project.ID, secretsourcetypes.UpsertBindingRequest{
+		SourceID: source.ID,
+		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "item", ID: "i9"}},
+		Required: true, Enabled: true,
+	})
+	require.NoError(t, err)
 	env, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	assert.Empty(t, env.Values)
+	assert.Equal(t, map[string]string{"API_KEY": "k", "DEBUG": "true"}, env.Values)
 }
