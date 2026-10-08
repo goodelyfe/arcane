@@ -269,6 +269,7 @@ type registerJobsParams struct {
 	UploadSessionsCleanup  *scheduler.UploadSessionsCleanupJob
 	GitCloneCleanup        *scheduler.GitCloneCleanupJob
 	BackupRepositoryPrune  *scheduler.BackupRepositoryPruneJob
+	SecretDriftCheck       *scheduler.SecretDriftCheckJob
 	ApnsOutbox             *scheduler.ApnsOutboxJob
 }
 
@@ -291,6 +292,7 @@ func registerJobs(params registerJobsParams) error {
 		params.UploadSessionsCleanup,
 		params.GitCloneCleanup,
 		params.BackupRepositoryPrune,
+		params.SecretDriftCheck,
 		params.UpgradeLogCleanup,
 		params.ApnsOutbox,
 	} {

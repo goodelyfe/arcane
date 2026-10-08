@@ -57,6 +57,9 @@ const (
 	// secrets (key count and source only, never values).
 	EventTypeProjectSecretsFetch EventType = "project.secrets.fetch"
 	EventTypeProjectSecretsError EventType = "project.secrets.error"
+	// EventTypeProjectSecretsChanged is logged once when a background check
+	// sees that a project's bound secrets changed since its last deploy.
+	EventTypeProjectSecretsChanged EventType = "project.secrets.changed"
 
 	EventTypeGitRepositoryCreate EventType = "git.repository.create"
 	EventTypeGitRepositoryUpdate EventType = "git.repository.update"
