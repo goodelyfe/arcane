@@ -6,7 +6,15 @@
 	import type { NormalizedCategory } from '#lib/components/category-index-page.types.js';
 	import { getCustomizeSubpageUrlsInNavOrder } from '#lib/config/navigation-config.js';
 	import { useCategorySearch } from '#lib/hooks/use-category-search.svelte.js';
-	import { TemplateIcon, FileTextIcon, RegistryIcon, VariableIcon, CustomizeIcon, GitBranchIcon } from '#lib/icons/index.js';
+	import {
+		TemplateIcon,
+		FileTextIcon,
+		RegistryIcon,
+		VariableIcon,
+		CustomizeIcon,
+		GitBranchIcon,
+		LockIcon
+	} from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { customizeSearchService } from '#lib/services/customize-search.js';
 	import { environmentStore } from '#lib/stores/environment.store.svelte.js';
@@ -32,7 +40,8 @@
 		layers: TemplateIcon,
 		package: RegistryIcon,
 		code: VariableIcon,
-		'git-branch': GitBranchIcon
+		'git-branch': GitBranchIcon,
+		key: LockIcon
 	};
 
 	const categoryMessages = {
@@ -51,6 +60,10 @@
 		'git-repositories': {
 			title: m.git_repositories_title,
 			description: m.git_repositories_subtitle
+		},
+		'secret-sources': {
+			title: m.secret_sources_title,
+			description: m.secret_sources_subtitle
 		}
 	} as const;
 

@@ -182,6 +182,12 @@ export const navigationItems: NavigationSections = {
 					url: '/customize/git-repositories',
 					icon: GitBranchIcon,
 					accessSurfaceId: 'customize.category.git-repositories'
+				},
+				{
+					title: m.secret_sources_title(),
+					url: '/customize/secret-sources',
+					icon: LockIcon,
+					accessSurfaceId: 'customize.category.secret-sources'
 				}
 			]
 		},
