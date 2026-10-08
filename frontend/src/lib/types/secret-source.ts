@@ -129,7 +129,7 @@ export interface ProjectSecretCheckResult {
 	deployedAt?: string;
 }
 
-export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder';
+export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder' | 'new-folder' | 'existing-folder';
 export type SetupValues = 'import' | 'placeholder';
 export type SetupEnvFile = 'keep' | 'remove';
 export type SetupRemoteState = 'missing' | 'same' | 'different' | 'exists' | 'unknown';
@@ -139,8 +139,10 @@ export interface SetupTarget {
 	mode: SetupMode;
 	projectName?: string;
 	projectId?: string;
-	environment: string;
+	environment?: string;
 	secretPath?: string;
+	folderName?: string;
+	folderId?: string;
 }
 
 export interface SetupPlanRequest {
@@ -166,8 +168,10 @@ export interface SetupIdentity {
 }
 
 export interface SetupPlan {
+	provider: SecretProvider;
 	suggestedProjectName: string;
 	suggestedSecretPath: string;
+	suggestedFolderName: string;
 	canWrite: boolean;
 	variables: SetupVariable[];
 	projectNameTaken: boolean;
@@ -203,4 +207,28 @@ export interface SetupResult {
 	binding?: ProjectSecretBinding;
 	removedKeys?: string[];
 	backupFile?: string;
+}
+
+export interface ComposeService {
+	name: string;
+	available: string[];
+	editable: boolean;
+	reason?: string;
+}
+
+export interface ComposeSkippedRef {
+	service: string;
+	key: string;
+	reason: string;
+}
+
+export interface ComposeRefsResult {
+	compose: string;
+	added: Record<string, string[]>;
+	skipped: ComposeSkippedRef[];
+}
+
+export interface TargetKeys {
+	keys: string[];
+	skipped: string[];
 }

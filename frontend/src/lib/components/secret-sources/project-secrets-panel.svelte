@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { invalidateAll } from '$app/navigation';
 	import { createQuery, useQueryClient } from '@tanstack/svelte-query';
 	import { toast } from 'svelte-sonner';
 
@@ -10,24 +11,36 @@
 	import { Label } from '#lib/components/ui/label/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, ShieldCheckIcon, ZapIcon } from '#lib/icons/index.js';
+	import {
+		AlertIcon,
+		AlertTriangleIcon,
+		CheckIcon,
+		LockIcon,
+		RefreshIcon,
+		ShieldCheckIcon,
+		VariableIcon,
+		ZapIcon
+	} from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
+	import { projectService } from '#lib/services/project-service.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
 	import type {
 		BitwardenTarget,
+		ComposeRefsResult,
 		InfisicalTarget,
 		ProjectSecretBinding,
 		ProjectSecretCheckResult,
 		SecretProvider
 	} from '#lib/types/secret-source.js';
-	import { handleApiResultWithCallbacks } from '#lib/utils/api.js';
+	import { extractApiErrorMessage, handleApiResultWithCallbacks } from '#lib/utils/api.js';
 	import { hasPermission } from '#lib/utils/auth.js';
 	import { confirmAndRun } from '#lib/utils/bulk-actions.js';
 	import { formatRelativeTime } from '#lib/utils/formatting.js';
 	import { tryCatch } from '#lib/utils/try-catch.js';
 
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
+	import ComposeRefsSheet from './compose-refs-sheet.svelte';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
 	import SecretSetupSheet from './secret-setup-sheet.svelte';
 
@@ -60,7 +73,8 @@
 		enabled: canListSources
 	}));
 	const sources = $derived(sourcesQuery.data ?? []);
-	const infisicalSources = $derived(sources.filter((source) => source.provider === 'infisical'));
+	// Setup can write to Infisical (with a setup identity) and to Bitwarden through bw serve.
+	const setupSources = $derived(sources.filter((source) => source.provider === 'infisical' || source.provider === 'bitwarden'));
 	const canSetup = $derived(canEdit && hasPermission('secret-sources:update'));
 
 	// ---- Guided setup ----
@@ -70,6 +84,49 @@
 	function openSetup() {
 		setupSession += 1;
 		setupOpen = true;
+	}
+
+	// ---- Compose references ----
+	let composeRefsOpen = $state(false);
+	let composeRefsSession = $state(0);
+	let composeRefsLoading = $state(false);
+	let composeRefsCompose = $state('');
+	let composeRefsKeys = $state<string[]>([]);
+
+	// Opens the picker for keys, or for every key of the current binding.
+	async function openComposeRefs(keys?: string[]) {
+		composeRefsLoading = true;
+		const projectResult = await tryCatch(projectService.getProjectForEnvironment(environmentId, projectId));
+		let keyList = keys;
+		let keyError: unknown = null;
+		if (!keyList && binding) {
+			const keysResult = await tryCatch(secretSourceService.targetKeys(binding.sourceId, binding.target));
+			keyList = keysResult.data?.keys;
+			keyError = keysResult.error;
+		}
+		composeRefsLoading = false;
+		if (projectResult.error || keyError || !keyList) {
+			toast.error(m.compose_refs_load_failed(), {
+				description: extractApiErrorMessage(projectResult.error ?? keyError)
+			});
+			return;
+		}
+		composeRefsCompose = projectResult.data.composeContent ?? '';
+		composeRefsKeys = keyList;
+		composeRefsSession += 1;
+		composeRefsOpen = true;
+	}
+
+	async function saveComposeRefs(result: ComposeRefsResult) {
+		const added = Object.values(result.added).reduce((total, keys) => total + keys.length, 0);
+		if (added === 0) return;
+		const saved = await tryCatch(projectService.updateProject(projectId, undefined, result.compose));
+		if (saved.error) {
+			toast.error(m.compose_refs_failed(), { description: extractApiErrorMessage(saved.error) });
+			return;
+		}
+		toast.success(m.compose_refs_saved({ count: added }));
+		await invalidateAll();
 	}
 
 	// ---- Editor state ----
@@ -246,7 +303,7 @@
 						/>
 					{:else}
 						<div class="flex flex-wrap justify-center gap-2">
-							{#if canSetup && infisicalSources.length > 0}
+							{#if canSetup && setupSources.length > 0}
 								<ArcaneButton
 									action="base"
 									icon={ZapIcon}
@@ -279,12 +336,22 @@
 			bind:open={setupOpen}
 			{environmentId}
 			{projectId}
-			sources={infisicalSources}
+			sources={setupSources}
 			onDone={async () => {
 				checkResult = null;
 				await invalidateBinding();
 			}}
+			onAddToCompose={(keys) => {
+				setupOpen = false;
+				void openComposeRefs(keys);
+			}}
 		/>
+	{/key}
+{/if}
+
+{#if composeRefsSession > 0}
+	{#key composeRefsSession}
+		<ComposeRefsSheet bind:open={composeRefsOpen} compose={composeRefsCompose} keys={composeRefsKeys} onApply={saveComposeRefs} />
 	{/key}
 {/if}
 
@@ -339,7 +406,7 @@
 					/>
 				{/if}
 				{#if canEdit}
-					{#if canSetup && current.provider === 'infisical' && infisicalSources.length > 0}
+					{#if canSetup && setupSources.length > 0}
 						<ArcaneButton
 							action="base"
 							tone="outline"
@@ -350,6 +417,16 @@
 							onclick={openSetup}
 						/>
 					{/if}
+					<ArcaneButton
+						action="base"
+						tone="outline"
+						size="sm"
+						icon={VariableIcon}
+						customLabel={m.compose_refs_open()}
+						loading={composeRefsLoading}
+						disabled={composeRefsLoading}
+						onclick={() => void openComposeRefs()}
+					/>
 					<ArcaneButton action="edit" tone="outline" size="sm" onclick={startEditing} disabled={!canListSources} />
 					<ArcaneButton
 						action="remove"
