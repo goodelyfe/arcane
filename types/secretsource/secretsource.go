@@ -23,10 +23,15 @@ const (
 
 // InfisicalSettings connects to Infisical with a Universal Auth machine
 // identity. The client secret is the source's credential.
+//
+// SetupClientID optionally names a second identity that the project setup
+// wizard uses to create projects, folders, and secrets. Its client secret is
+// the source's setup credential. Deploys never use it.
 type InfisicalSettings struct {
 	SiteURL          string `json:"siteUrl"`
 	ClientID         string `json:"clientId"`
 	OrganizationSlug string `json:"organizationSlug,omitempty"`
+	SetupClientID    string `json:"setupClientId,omitempty"`
 }
 
 // BitwardenSettings points at a Bitwarden CLI `bw serve` endpoint, which works
@@ -50,11 +55,14 @@ type Source struct {
 	Provider      string         `json:"provider"`
 	Settings      SourceSettings `json:"settings"`
 	HasCredential bool           `json:"hasCredential"`
-	BindingCount  int            `json:"bindingCount"`
-	LastTestedAt  *time.Time     `json:"lastTestedAt,omitempty"`
-	LastTestError *string        `json:"lastTestError,omitempty"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	UpdatedAt     *time.Time     `json:"updatedAt,omitempty"`
+	// HasSetupCredential reports whether the setup wizard can write to the
+	// provider.
+	HasSetupCredential bool       `json:"hasSetupCredential"`
+	BindingCount       int        `json:"bindingCount"`
+	LastTestedAt       *time.Time `json:"lastTestedAt,omitempty"`
+	LastTestError      *string    `json:"lastTestError,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          *time.Time `json:"updatedAt,omitempty"`
 }
 
 type CreateSourceRequest struct {
@@ -62,14 +70,19 @@ type CreateSourceRequest struct {
 	Provider   string         `json:"provider"`
 	Settings   SourceSettings `json:"settings"`
 	Credential string         `json:"credential,omitempty"`
+	// SetupCredential is the client secret of InfisicalSettings.SetupClientID.
+	SetupCredential string `json:"setupCredential,omitempty"`
 }
 
 // UpdateSourceRequest updates a source; nil fields keep the current value. A
-// nil or empty Credential keeps the stored one. The provider cannot change.
+// nil or empty Credential or SetupCredential keeps the stored one. Clearing
+// the setup client ID also deletes the stored setup credential. The provider
+// cannot change.
 type UpdateSourceRequest struct {
-	Name       *string         `json:"name,omitzero"`
-	Settings   *SourceSettings `json:"settings,omitzero"`
-	Credential *string         `json:"credential,omitzero"`
+	Name            *string         `json:"name,omitzero"`
+	Settings        *SourceSettings `json:"settings,omitzero"`
+	Credential      *string         `json:"credential,omitzero"`
+	SetupCredential *string         `json:"setupCredential,omitzero"`
 }
 
 // TestSourceRequest tests settings without saving them. When SourceID is set

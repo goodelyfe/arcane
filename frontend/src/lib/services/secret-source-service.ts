@@ -8,7 +8,11 @@ import type {
 	SecretSourceCreateDto,
 	SecretSourceTestDto,
 	SecretSourceTestResult,
-	SecretSourceUpdateDto
+	SecretSourceUpdateDto,
+	SetupApplyRequest,
+	SetupPlan,
+	SetupPlanRequest,
+	SetupResult
 } from '#lib/types/secret-source.js';
 
 import BaseAPIService from './api-service';
@@ -44,6 +48,14 @@ class SecretSourceService extends BaseAPIService {
 		};
 		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/browse`, { params });
 		return response.data?.data ?? [];
+	}
+
+	async planSetup(environmentId: string, projectId: string, request: SetupPlanRequest): Promise<SetupPlan> {
+		return this.handleResponse(this.api.post(`${this.bindingPath(environmentId, projectId)}/setup/plan`, request));
+	}
+
+	async applySetup(environmentId: string, projectId: string, request: SetupApplyRequest): Promise<SetupResult> {
+		return this.handleResponse(this.api.post(`${this.bindingPath(environmentId, projectId)}/setup`, request));
 	}
 
 	async getBinding(environmentId: string, projectId: string): Promise<ProjectSecretBinding | null> {

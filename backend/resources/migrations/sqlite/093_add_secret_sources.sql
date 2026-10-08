@@ -7,6 +7,7 @@ CREATE TABLE secret_sources (
     provider TEXT NOT NULL,
     settings TEXT NOT NULL DEFAULT '{}',
     credential TEXT NOT NULL DEFAULT '',
+    setup_credential TEXT NOT NULL DEFAULT '',
     last_tested_at DATETIME,
     last_test_error TEXT
 );
