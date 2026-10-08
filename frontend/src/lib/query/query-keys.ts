@@ -94,6 +94,14 @@ export const queryKeys = {
 		all: ['variables'] as const,
 		list: () => ['variables', 'list'] as const
 	},
+	secretSources: {
+		all: ['secret-sources'] as const,
+		list: () => ['secret-sources', 'list'] as const,
+		remoteProjects: (sourceId: string) => ['secret-sources', 'remote-projects', sourceId] as const,
+		remoteFolders: (sourceId: string, projectId: string, environment: string, path: string) =>
+			['secret-sources', 'remote-folders', sourceId, projectId, environment, path] as const,
+		binding: (environmentId: string, projectId: string) => ['secret-sources', 'binding', environmentId, projectId] as const
+	},
 	notifications: {
 		settings: () => ['notification-settings'] as const
 	},
