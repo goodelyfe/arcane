@@ -6,6 +6,8 @@ export interface InfisicalSettings {
 	siteUrl: string;
 	clientId: string;
 	organizationSlug?: string;
+	// Optional second identity used only by project setup to write to Infisical.
+	setupClientId?: string;
 }
 
 export interface BitwardenSettings {
@@ -23,6 +25,7 @@ export interface SecretSource {
 	provider: SecretProvider;
 	settings: SourceSettings;
 	hasCredential: boolean;
+	hasSetupCredential: boolean;
 	bindingCount: number;
 	lastTestedAt?: string;
 	lastTestError?: string;
@@ -35,12 +38,14 @@ export interface SecretSourceCreateDto {
 	provider: SecretProvider;
 	settings: SourceSettings;
 	credential?: string;
+	setupCredential?: string;
 }
 
 export interface SecretSourceUpdateDto {
 	name?: string;
 	settings?: SourceSettings;
 	credential?: string; // omitted or empty = keep stored credential
+	setupCredential?: string; // omitted or empty = keep stored setup credential
 }
 
 export interface SecretSourceTestDto {
@@ -122,4 +127,80 @@ export interface ProjectSecretCheckResult {
 	neverDeployed: boolean;
 	fetchedAt: string;
 	deployedAt?: string;
+}
+
+export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder';
+export type SetupValues = 'import' | 'placeholder';
+export type SetupEnvFile = 'keep' | 'remove';
+export type SetupRemoteState = 'missing' | 'same' | 'different' | 'exists' | 'unknown';
+export type SetupStepStatus = 'done' | 'skipped' | 'failed' | 'pending';
+
+export interface SetupTarget {
+	mode: SetupMode;
+	projectName?: string;
+	projectId?: string;
+	environment: string;
+	secretPath?: string;
+}
+
+export interface SetupPlanRequest {
+	sourceId: string;
+	target?: SetupTarget;
+}
+
+export interface SetupVariable {
+	key: string;
+	inCompose: boolean;
+	composeDefault: boolean;
+	composeRequired: boolean;
+	inEnvFile: boolean;
+	envEmpty: boolean;
+	fromGit: boolean;
+	secretLike: boolean;
+	remote: SetupRemoteState;
+}
+
+export interface SetupIdentity {
+	id: string;
+	name: string;
+}
+
+export interface SetupPlan {
+	suggestedProjectName: string;
+	suggestedSecretPath: string;
+	canWrite: boolean;
+	variables: SetupVariable[];
+	projectNameTaken: boolean;
+	remoteError?: string;
+	deployIdentity?: SetupIdentity;
+	deployIdentityError?: string;
+	hasGitSource: boolean;
+	alreadyBound: boolean;
+}
+
+export interface SetupApplyRequest {
+	sourceId: string;
+	target: SetupTarget;
+	keys: string[];
+	values: SetupValues;
+	overwriteKeys: string[];
+	envFile: SetupEnvFile;
+	keepBackup: boolean;
+	grantDeployIdentity: boolean;
+	required: boolean;
+	autoRedeploy: boolean;
+}
+
+export interface SetupStep {
+	id: 'project' | 'folder' | 'secrets' | 'grant' | 'binding' | 'verify' | 'envFile';
+	status: SetupStepStatus;
+	detail?: string;
+}
+
+export interface SetupResult {
+	ok: boolean;
+	steps: SetupStep[];
+	binding?: ProjectSecretBinding;
+	removedKeys?: string[];
+	backupFile?: string;
 }

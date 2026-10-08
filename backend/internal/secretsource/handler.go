@@ -61,6 +61,18 @@ type UpsertProjectBindingInput struct {
 	Body          secretsourcetypes.UpsertBindingRequest
 }
 
+type SetupPlanInput struct {
+	EnvironmentID string `path:"id" doc:"Environment ID"`
+	ProjectID     string `path:"projectId" doc:"Project ID"`
+	Body          secretsourcetypes.SetupPlanRequest
+}
+
+type SetupApplyInput struct {
+	EnvironmentID string `path:"id" doc:"Environment ID"`
+	ProjectID     string `path:"projectId" doc:"Project ID"`
+	Body          secretsourcetypes.SetupApplyRequest
+}
+
 func (h *SecretSourceHandler) ListSources(ctx context.Context, _ *ListSourcesInput) (*handlerutil.Out[[]secretsourcetypes.Source], error) {
 	sources, err := h.service.ListSources(ctx)
 	if err != nil {
@@ -159,6 +171,30 @@ func (h *SecretSourceHandler) CheckProjectBinding(ctx context.Context, input *Pr
 		return nil, err
 	}
 	result, err := h.service.CheckBinding(ctx, project, handlerutil.CurrentActor(ctx))
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(result), nil
+}
+
+func (h *SecretSourceHandler) PlanProjectSetup(ctx context.Context, input *SetupPlanInput) (*handlerutil.Out[secretsourcetypes.SetupPlan], error) {
+	project, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := h.service.PlanSetup(ctx, project, input.Body)
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(plan), nil
+}
+
+func (h *SecretSourceHandler) ApplyProjectSetup(ctx context.Context, input *SetupApplyInput) (*handlerutil.Out[secretsourcetypes.SetupResult], error) {
+	project, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.service.ApplySetup(ctx, project, input.Body, handlerutil.CurrentActor(ctx))
 	if err != nil {
 		return nil, httpErrorInternal(err)
 	}

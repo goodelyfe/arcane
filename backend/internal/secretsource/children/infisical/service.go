@@ -35,10 +35,15 @@ func NormalizeSettings(settings *secretsourcetypes.InfisicalSettings) (*secretso
 	if clientID == "" {
 		return nil, errors.New("client ID is required")
 	}
+	setupClientID := strings.TrimSpace(settings.SetupClientID)
+	if setupClientID != "" && setupClientID == clientID {
+		return nil, errors.New("the setup identity must differ from the deploy identity; deploys should keep a read-only identity")
+	}
 	return &secretsourcetypes.InfisicalSettings{
 		SiteURL:          siteURL.String(),
 		ClientID:         clientID,
 		OrganizationSlug: strings.TrimSpace(settings.OrganizationSlug),
+		SetupClientID:    setupClientID,
 	}, nil
 }
 

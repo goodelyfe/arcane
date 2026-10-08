@@ -154,4 +154,32 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
 	}, authz.PermProjectsDeploy, h.CheckProjectBinding)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "planProjectSecretSetup",
+		Method:      "POST",
+		Path:        "/environments/{id}/projects/{projectId}/secrets/setup/plan",
+		Summary:     "Plan moving a project's variables to a secret manager",
+		Description: "List the variables the project's compose files and .env use and, for a target, where each stands in Infisical. Writes nothing; values are never returned.",
+		Tags:        tags,
+		Security:    handlerutil.DefaultOperationSecurity(),
+		// Setup writes with the source's setup identity, so it also needs the
+		// right to change secret sources.
+		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUpdate),
+	}, authz.PermProjectsUpdate, h.PlanProjectSetup)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "applyProjectSecretSetup",
+		Method:      "POST",
+		Path:        "/environments/{id}/projects/{projectId}/secrets/setup",
+		Summary:     "Move a project's variables to a secret manager",
+		Description: "With the source's setup identity, create the Infisical project or folder and the secrets, " +
+			"give the deploy identity read access, bind the project, verify the binding, " +
+			"and optionally remove the moved keys from the .env.",
+		Tags:     tags,
+		Security: handlerutil.DefaultOperationSecurity(),
+		// Setup writes with the source's setup identity, so it also needs the
+		// right to change secret sources.
+		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUpdate),
+	}, authz.PermProjectsUpdate, h.ApplyProjectSetup)
 }

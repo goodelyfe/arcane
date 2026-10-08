@@ -270,6 +270,9 @@ func provideProjectServiceInternal(
 ) *project.ProjectService {
 	service := project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
 	service.SetSecretEnvResolver(secretSources)
+	if secretSources != nil {
+		secretSources.SetProjectFileAccess(service)
+	}
 	return service
 }
 

@@ -92,6 +92,7 @@ type SecretSourceService struct {
 	db           *database.DB
 	eventService *event.EventService
 	httpClient   *http.Client
+	projectFiles ProjectFileAccess
 
 	providersMu sync.Mutex
 	providers   map[string]cachedProvider
@@ -169,6 +170,9 @@ func (s *SecretSourceService) CreateSource(ctx context.Context, req secretsource
 	}
 
 	source := SecretSource{Name: name, Provider: req.Provider, Settings: settings, Credential: credential}
+	if setupErr := applySetupCredentialInternal(&source, "", req.SetupCredential); setupErr != nil {
+		return nil, setupErr
+	}
 	if createErr := s.db.WithContext(ctx).Create(&source).Error; createErr != nil {
 		return nil, fmt.Errorf("failed to create secret source: %w", createErr)
 	}
@@ -182,6 +186,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 		return nil, err
 	}
 	beforeFingerprint := connectionFingerprintInternal(source)
+	beforeSetupClientID := setupClientIDInternal(source.Settings)
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -206,6 +211,13 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 			return nil, fmt.Errorf("failed to encrypt credential: %w", encryptErr)
 		}
 		source.Credential = encrypted
+	}
+	setupSecret := ""
+	if req.SetupCredential != nil {
+		setupSecret = *req.SetupCredential
+	}
+	if setupErr := applySetupCredentialInternal(source, beforeSetupClientID, setupSecret); setupErr != nil {
+		return nil, setupErr
 	}
 	// A test result only describes the connection it was run against.
 	if connectionFingerprintInternal(source) != beforeFingerprint {
@@ -783,10 +795,47 @@ func sameTargetInternal(a, b secretsourcetypes.BindingTarget) bool {
 	return leftErr == nil && rightErr == nil && string(left) == string(right)
 }
 
-// connectionFingerprintInternal identifies everything a provider connection
-// depends on: provider, settings, and the stored credential.
+func setupClientIDInternal(settings secretsourcetypes.SourceSettings) string {
+	if settings.Infisical == nil {
+		return ""
+	}
+	return settings.Infisical.SetupClientID
+}
+
+// applySetupCredentialInternal keeps the setup credential consistent with the
+// setup client ID: no ID means no credential, and a new ID needs its secret.
+// An empty secret keeps the stored one for an unchanged ID.
+func applySetupCredentialInternal(source *SecretSource, previousClientID, secret string) error {
+	clientID := setupClientIDInternal(source.Settings)
+	if clientID == "" {
+		source.SetupCredential = ""
+		return nil
+	}
+	if secret == "" {
+		if source.SetupCredential == "" || clientID != previousClientID {
+			return common.Classify(common.ErrSecretSourceInvalid, errors.New("enter the setup identity's client secret"))
+		}
+		return nil
+	}
+	encrypted, err := crypto.Encrypt(secret)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt setup credential: %w", err)
+	}
+	source.SetupCredential = encrypted
+	return nil
+}
+
+// connectionFingerprintInternal identifies everything a deploy connection
+// depends on: provider, settings, and the stored credential. The setup
+// identity is left out because deploys never use it.
 func connectionFingerprintInternal(source *SecretSource) string {
-	settings, err := json.Marshal(source.Settings)
+	fingerprintSettings := source.Settings
+	if fingerprintSettings.Infisical != nil {
+		deployOnly := *fingerprintSettings.Infisical
+		deployOnly.SetupClientID = ""
+		fingerprintSettings.Infisical = &deployOnly
+	}
+	settings, err := json.Marshal(fingerprintSettings)
 	if err != nil {
 		settings = nil
 	}
@@ -868,16 +917,17 @@ func overriddenKeysInternal(ctx context.Context, project ProjectRef, keys []stri
 
 func sourceToDTOInternal(source *SecretSource, bindingCount int) secretsourcetypes.Source {
 	return secretsourcetypes.Source{
-		ID:            source.ID,
-		Name:          source.Name,
-		Provider:      source.Provider,
-		Settings:      source.Settings,
-		HasCredential: source.Credential != "",
-		BindingCount:  bindingCount,
-		LastTestedAt:  source.LastTestedAt,
-		LastTestError: source.LastTestError,
-		CreatedAt:     source.CreatedAt,
-		UpdatedAt:     source.UpdatedAt,
+		ID:                 source.ID,
+		Name:               source.Name,
+		Provider:           source.Provider,
+		Settings:           source.Settings,
+		HasCredential:      source.Credential != "",
+		HasSetupCredential: source.SetupCredential != "",
+		BindingCount:       bindingCount,
+		LastTestedAt:       source.LastTestedAt,
+		LastTestError:      source.LastTestError,
+		CreatedAt:          source.CreatedAt,
+		UpdatedAt:          source.UpdatedAt,
 	}
 }
 

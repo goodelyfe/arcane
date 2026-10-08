@@ -9,16 +9,18 @@ import (
 )
 
 // SecretSource is a saved connection to an external secret provider.
-// Credential holds ciphertext; Settings never holds secrets.
+// Credential (the deploy identity's secret) and SetupCredential (the optional
+// setup identity's secret) hold ciphertext; Settings never holds secrets.
 type SecretSource struct {
 	database.BaseModel
 
-	Name          string                           `gorm:"column:name"`
-	Provider      string                           `gorm:"column:provider"`
-	Settings      secretsourcetypes.SourceSettings `gorm:"column:settings;serializer:json"`
-	Credential    string                           `gorm:"column:credential"`
-	LastTestedAt  *time.Time                       `gorm:"column:last_tested_at"`
-	LastTestError *string                          `gorm:"column:last_test_error"`
+	Name            string                           `gorm:"column:name"`
+	Provider        string                           `gorm:"column:provider"`
+	Settings        secretsourcetypes.SourceSettings `gorm:"column:settings;serializer:json"`
+	Credential      string                           `gorm:"column:credential"`
+	SetupCredential string                           `gorm:"column:setup_credential"`
+	LastTestedAt    *time.Time                       `gorm:"column:last_tested_at"`
+	LastTestError   *string                          `gorm:"column:last_test_error"`
 }
 
 func (SecretSource) TableName() string { return "secret_sources" }
