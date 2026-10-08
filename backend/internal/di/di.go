@@ -43,6 +43,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/role"
 	s3domain "github.com/getarcaneapp/arcane/backend/v2/internal/s3"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/search"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/session"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/swarm"
@@ -112,6 +113,7 @@ var ServiceOptions = fx.Options(
 		diagnostics.NewDiagnosticsService,
 		provideGitOpsSyncService,
 		variable.NewVariableService,
+		secretsource.NewSecretSourceService,
 		backup.NewRecoveryKeyStore,
 		upload.NewUploadService,
 		health.NewService,
@@ -143,9 +145,12 @@ var ServiceOptions = fx.Options(
 			localKv *kv.KVService,
 			localRegistry *registry.ContainerRegistryService,
 			localEnvironment *environment.EnvironmentService,
+			secretSources *secretsource.SecretSourceService,
 			cfg *config.Config,
 		) *project.ProjectService {
-			return project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
+			service := project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
+			service.SetSecretEnvResolver(secretSources)
+			return service
 		},
 		provideBackupEngine,
 		func(
@@ -230,6 +235,9 @@ var ServiceOptions = fx.Options(
 			return registry.New(service, func(ctx context.Context) {
 				localEnvironment.QueueRemoteSync(ctx, "registries", localEnvironment.SyncRegistriesToRemoteEnvironments)
 			})
+		},
+		func(service *secretsource.SecretSourceService, projectService *project.ProjectService) *secretsource.Module {
+			return secretsource.New(service, projectService.SecretProjectRef)
 		},
 		func(service *auth.AuthService, userService *user.UserService, settingsService *settings.SettingsService, passkeyService *passkey.PasskeyService) *auth.Module {
 			return auth.New(service, userService, settingsService, passkeyService.BeginMFAAuthentication)
