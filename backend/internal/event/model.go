@@ -53,6 +53,11 @@ const (
 	EventTypeProjectUpdate EventType = "project.update"
 	EventTypeProjectError  EventType = "project.error"
 
+	// EventTypeProjectSecretsFetch records each read of a project's bound
+	// secrets (key count and source only, never values).
+	EventTypeProjectSecretsFetch EventType = "project.secrets.fetch"
+	EventTypeProjectSecretsError EventType = "project.secrets.error"
+
 	EventTypeGitRepositoryCreate EventType = "git.repository.create"
 	EventTypeGitRepositoryUpdate EventType = "git.repository.update"
 	EventTypeGitRepositoryDelete EventType = "git.repository.delete"
