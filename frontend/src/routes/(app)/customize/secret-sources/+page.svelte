@@ -56,13 +56,46 @@
 				? m.common_update_failed({ resource: m.secret_source() })
 				: m.common_create_failed({ resource: m.secret_source() }),
 			setLoadingState: (value) => (isSubmitting = value),
-			onSuccess: async () => {
+			onSuccess: async (saved) => {
 				toast.success(
 					isEdit
 						? m.common_update_success({ resource: m.secret_source() })
 						: m.common_create_success({ resource: m.secret_source() })
 				);
 				isSheetOpen = false;
+				// Test the saved settings so the table shows a current status.
+				await recordConnectionTest(saved);
+				await refreshSources();
+			}
+		});
+	}
+
+	function storedTestRequest(source: SecretSource) {
+		return {
+			sourceId: source.id,
+			siteUrl: source.siteUrl,
+			clientId: source.clientId,
+			organizationSlug: source.organizationSlug ?? ''
+		};
+	}
+
+	async function recordConnectionTest(source: SecretSource) {
+		await tryCatch(secretSourceService.test(storedTestRequest(source)));
+	}
+
+	async function handleTest(source: SecretSource) {
+		const result = await tryCatch(secretSourceService.test(storedTestRequest(source)));
+		await handleApiResultWithCallbacks({
+			result,
+			message: m.secret_sources_test_failed(),
+			onSuccess: async (outcome) => {
+				if (outcome.ok) {
+					toast.success(
+						outcome.canListProjects ? m.secret_sources_test_success({ count: outcome.projectsVisible }) : outcome.message
+					);
+				} else {
+					toast.error(m.secret_sources_test_failed(), { description: outcome.message });
+				}
 				await refreshSources();
 			}
 		});
@@ -113,7 +146,7 @@
 				</Empty.Root>
 			</div>
 		{:else}
-			<SecretSourceTable {sources} onEdit={openEditSheet} onDelete={handleDelete} />
+			<SecretSourceTable {sources} onEdit={openEditSheet} onDelete={handleDelete} onTest={handleTest} />
 		{/if}
 	{/snippet}
 
