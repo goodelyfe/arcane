@@ -117,6 +117,36 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 	}, authz.PermSecretSourcesRead, h.Browse)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "listSecretSourceTargetKeys",
+		Method:      "POST",
+		Path:        "/secret-sources/{id}/keys",
+		Summary:     "List a target's variable names",
+		Description: "Fetch a binding target and return its variable names, without values, to prepare a project before binding it",
+		Tags:        tags,
+		Security:    handlerutil.DefaultOperationSecurity(),
+	}, authz.PermSecretSourcesRead, h.TargetKeys)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "listComposeServicesForSecrets",
+		Method:      "POST",
+		Path:        "/secret-sources/compose/services",
+		Summary:     "List compose services for secret references",
+		Description: "List the services of compose content and the variables each already receives. Nothing is saved.",
+		Tags:        tags,
+		Security:    handlerutil.DefaultOperationSecurity(),
+	}, authz.PermSecretSourcesRead, h.ComposeServices)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "addComposeSecretRefs",
+		Method:      "POST",
+		Path:        "/secret-sources/compose/refs",
+		Summary:     "Add secret references to compose content",
+		Description: "Add KEY: ${KEY} entries to the environment of chosen services, keeping comments and layout. Returns the new content; nothing is saved.",
+		Tags:        tags,
+		Security:    handlerutil.DefaultOperationSecurity(),
+	}, authz.PermSecretSourcesRead, h.AddComposeRefs)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
 		OperationID: "getProjectSecretBinding",
 		Method:      "GET",
 		Path:        "/environments/{id}/projects/{projectId}/secrets",

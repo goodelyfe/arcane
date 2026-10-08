@@ -1,4 +1,7 @@
 import type {
+	BindingTarget,
+	ComposeRefsResult,
+	ComposeService,
 	ProjectSecretBinding,
 	ProjectSecretBindingDto,
 	ProjectSecretCheckResult,
@@ -12,7 +15,8 @@ import type {
 	SetupApplyRequest,
 	SetupPlan,
 	SetupPlanRequest,
-	SetupResult
+	SetupResult,
+	TargetKeys
 } from '#lib/types/secret-source.js';
 
 import BaseAPIService from './api-service';
@@ -48,6 +52,18 @@ class SecretSourceService extends BaseAPIService {
 		};
 		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/browse`, { params });
 		return response.data?.data ?? [];
+	}
+
+	async targetKeys(sourceId: string, target: BindingTarget): Promise<TargetKeys> {
+		return this.handleResponse(this.api.post(`/secret-sources/${encodeURIComponent(sourceId)}/keys`, { target }));
+	}
+
+	async composeServices(compose: string): Promise<ComposeService[]> {
+		return this.handleResponse(this.api.post('/secret-sources/compose/services', { compose }));
+	}
+
+	async addComposeRefs(compose: string, assignments: Record<string, string[]>): Promise<ComposeRefsResult> {
+		return this.handleResponse(this.api.post('/secret-sources/compose/refs', { compose, assignments }));
 	}
 
 	async planSetup(environmentId: string, projectId: string, request: SetupPlanRequest): Promise<SetupPlan> {

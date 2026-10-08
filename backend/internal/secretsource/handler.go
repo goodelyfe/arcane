@@ -73,6 +73,19 @@ type SetupApplyInput struct {
 	Body          secretsourcetypes.SetupApplyRequest
 }
 
+type ComposeServicesInput struct {
+	Body secretsourcetypes.ComposeServicesRequest
+}
+
+type ComposeRefsInput struct {
+	Body secretsourcetypes.ComposeRefsRequest
+}
+
+type TargetKeysInput struct {
+	ID   string `path:"id" doc:"Secret source ID"`
+	Body secretsourcetypes.TargetKeysRequest
+}
+
 func (h *SecretSourceHandler) ListSources(ctx context.Context, _ *ListSourcesInput) (*handlerutil.Out[[]secretsourcetypes.Source], error) {
 	sources, err := h.service.ListSources(ctx)
 	if err != nil {
@@ -199,6 +212,30 @@ func (h *SecretSourceHandler) ApplyProjectSetup(ctx context.Context, input *Setu
 		return nil, httpErrorInternal(err)
 	}
 	return okInternal(result), nil
+}
+
+func (h *SecretSourceHandler) ComposeServices(_ context.Context, input *ComposeServicesInput) (*handlerutil.Out[[]secretsourcetypes.ComposeService], error) {
+	services, err := ComposeServices(input.Body.Compose)
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(services), nil
+}
+
+func (h *SecretSourceHandler) AddComposeRefs(_ context.Context, input *ComposeRefsInput) (*handlerutil.Out[secretsourcetypes.ComposeRefsResult], error) {
+	result, err := AddComposeRefs(input.Body)
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(result), nil
+}
+
+func (h *SecretSourceHandler) TargetKeys(ctx context.Context, input *TargetKeysInput) (*handlerutil.Out[secretsourcetypes.TargetKeys], error) {
+	keys, err := h.service.TargetKeys(ctx, input.ID, input.Body.Target)
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(keys), nil
 }
 
 // localProjectInternal resolves a project of the local environment. Remote

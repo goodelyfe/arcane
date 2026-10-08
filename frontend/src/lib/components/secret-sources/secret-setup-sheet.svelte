@@ -15,7 +15,16 @@
 	import * as ResponsiveDialog from '#lib/components/ui/responsive-dialog/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { AlertIcon, AlertTriangleIcon, ClockIcon, CloseIcon, FilterIcon, SuccessIcon, ZapIcon } from '#lib/icons/index.js';
+	import {
+		AlertIcon,
+		AlertTriangleIcon,
+		ClockIcon,
+		CloseIcon,
+		FilterIcon,
+		SuccessIcon,
+		VariableIcon,
+		ZapIcon
+	} from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
@@ -37,22 +46,35 @@
 		environmentId,
 		projectId,
 		sources,
-		onDone
+		onDone,
+		onAddToCompose
 	}: {
 		open: boolean;
 		environmentId: string;
 		projectId: string;
-		// Infisical sources only.
+		// Infisical and Bitwarden sources.
 		sources: SecretSource[];
 		onDone: () => void | Promise<void>;
+		// Opens the compose reference picker for keys the compose files do not use yet.
+		onAddToCompose?: (keys: string[]) => void;
 	} = $props();
 
 	const defaultEnvironments = ['dev', 'staging', 'prod'];
 
 	// ---- Where ----
-	let sourceId = $state(untrack(() => (sources.find((source) => source.hasSetupCredential) ?? sources[0])?.id ?? ''));
-	let mode = $state<SetupMode>('new-project');
+	let sourceId = $state(
+		untrack(
+			() => (sources.find((source) => source.hasSetupCredential || source.provider === 'bitwarden') ?? sources[0])?.id ?? ''
+		)
+	);
+	const provider = $derived(sources.find((source) => source.id === sourceId)?.provider ?? 'infisical');
+	let mode = $state<SetupMode>(
+		untrack(() => (sources.find((source) => source.id === sourceId)?.provider === 'bitwarden' ? 'new-folder' : 'new-project'))
+	);
+	const createsContainer = $derived(mode === 'new-project' || mode === 'new-folder');
 	let projectName = $state('');
+	let folderName = $state('');
+	let existingFolderId = $state('');
 	let existingProjectId = $state('');
 	let environment = $state('prod');
 	let secretPath = $state('');
@@ -60,6 +82,14 @@
 	// Typing in the name or path waits a moment before asking Infisical again.
 	let debouncedTarget = $state<SetupTarget | null>(null);
 	const target = $derived.by<SetupTarget | null>(() => {
+		if (mode === 'new-folder') {
+			return { mode, folderName: folderName.trim() };
+		}
+		if (mode === 'existing-folder') {
+			if (!existingFolderId) return null;
+			const folder = remoteFolders.find((candidate) => candidate.id === existingFolderId);
+			return { mode, folderId: existingFolderId, folderName: folder?.name ?? '' };
+		}
 		if (mode === 'new-project') {
 			return { mode, projectName: projectName.trim(), environment };
 		}
@@ -84,9 +114,16 @@
 	const projectsQuery = createQuery(() => ({
 		queryKey: queryKeys.secretSources.browse(sourceId, 'projects'),
 		queryFn: () => secretSourceService.browse(sourceId, { kind: 'projects' }),
-		enabled: open && !!sourceId && mode !== 'new-project',
+		enabled: open && !!sourceId && (mode === 'existing-project' || mode === 'shared-folder'),
 		retry: false
 	}));
+	const foldersQuery = createQuery(() => ({
+		queryKey: queryKeys.secretSources.browse(sourceId, 'folders'),
+		queryFn: () => secretSourceService.browse(sourceId, { kind: 'folders' }),
+		enabled: open && !!sourceId && mode === 'existing-folder',
+		retry: false
+	}));
+	const remoteFolders = $derived(foldersQuery.data ?? []);
 	const remoteProjects = $derived(projectsQuery.data ?? []);
 	const selectedRemoteProject = $derived(remoteProjects.find((project) => project.id === existingProjectId));
 	const environmentOptions = $derived(
@@ -102,6 +139,7 @@
 		prefilled = true;
 		untrack(() => {
 			projectName = plan.suggestedProjectName;
+			folderName = plan.suggestedFolderName;
 			applyDefaultSelection(plan.variables);
 		});
 	});
@@ -167,9 +205,9 @@
 	const canApply = $derived(
 		!!plan?.canWrite &&
 			!!target &&
-			!!environment &&
+			(provider === 'bitwarden' || !!environment) &&
 			selectedKeys.length > 0 &&
-			!(mode === 'new-project' && plan.projectNameTaken) &&
+			!(createsContainer && plan.projectNameTaken) &&
 			!planQuery.isFetching &&
 			!applying
 	);
@@ -187,7 +225,7 @@
 				overwriteKeys: values === 'import' ? selectedKeys.filter((key) => overwrite.has(key)) : [],
 				envFile,
 				keepBackup,
-				grantDeployIdentity,
+				grantDeployIdentity: provider === 'infisical' && grantDeployIdentity,
 				required,
 				autoRedeploy
 			})
@@ -199,6 +237,38 @@
 		}
 		result = response.data;
 		await onDone();
+	}
+
+	// Moved keys that no compose file references yet: without a reference,
+	// compose does not pass them to any container.
+	const unreferencedKeys = $derived(
+		variables.filter((variable) => selected.has(variable.key) && !variable.inCompose).map((variable) => variable.key)
+	);
+
+	function modeOptions(current: string) {
+		if (current === 'bitwarden') {
+			return [
+				{
+					value: 'new-folder',
+					label: m.secret_setup_mode_new_folder(),
+					description: m.secret_setup_mode_new_folder_description()
+				},
+				{
+					value: 'existing-folder',
+					label: m.secret_setup_mode_existing_folder(),
+					description: m.secret_setup_mode_existing_folder_description()
+				}
+			];
+		}
+		return [
+			{ value: 'new-project', label: m.secret_setup_mode_new(), description: m.secret_setup_mode_new_description() },
+			{
+				value: 'existing-project',
+				label: m.secret_setup_mode_existing(),
+				description: m.secret_setup_mode_existing_description()
+			},
+			{ value: 'shared-folder', label: m.secret_setup_mode_shared(), description: m.secret_setup_mode_shared_description() }
+		];
 	}
 
 	function stepLabel(step: SetupStep): string {
@@ -288,6 +358,8 @@
 				onValueChange={(value) => {
 					sourceId = value;
 					existingProjectId = '';
+					existingFolderId = '';
+					mode = sources.find((source) => source.id === value)?.provider === 'bitwarden' ? 'new-folder' : 'new-project';
 					prefilled = false;
 				}}
 			>
@@ -336,7 +408,7 @@
 			<h3 class="text-sm font-semibold">{m.secret_setup_where()}</h3>
 			<RadioGroup.Root value={mode} onValueChange={(value) => changeMode(value as SetupMode)}>
 				<div class="grid gap-2">
-					{#each [{ value: 'new-project', label: m.secret_setup_mode_new(), description: m.secret_setup_mode_new_description() }, { value: 'existing-project', label: m.secret_setup_mode_existing(), description: m.secret_setup_mode_existing_description() }, { value: 'shared-folder', label: m.secret_setup_mode_shared(), description: m.secret_setup_mode_shared_description() }] as option (option.value)}
+					{#each modeOptions(provider) as option (option.value)}
 						<label class="flex cursor-pointer items-start gap-3 rounded-md border border-border/50 p-3 hover:bg-accent/40">
 							<RadioGroup.Item value={option.value} class="mt-0.5" />
 							<div class="grid gap-1 leading-none">
@@ -348,63 +420,67 @@
 				</div>
 			</RadioGroup.Root>
 
-			<div class="grid gap-4 sm:grid-cols-2">
-				{#if mode === 'new-project'}
+			{#if provider === 'bitwarden'}
+				{@render bitwardenFields()}
+			{:else}
+				<div class="grid gap-4 sm:grid-cols-2">
+					{#if mode === 'new-project'}
+						<div class="space-y-2">
+							<Label for="setup-project-name">{m.secret_setup_project_name()}</Label>
+							<Input id="setup-project-name" bind:value={projectName} maxlength={64} />
+						</div>
+					{:else}
+						<div class="space-y-2">
+							<Label for="setup-project">{m.project_secrets_infisical_project()}</Label>
+							{#if projectsQuery.isError || (projectsQuery.isSuccess && remoteProjects.length === 0)}
+								<Input
+									id="setup-project"
+									mono
+									placeholder={m.project_secrets_infisical_project_id()}
+									bind:value={existingProjectId}
+								/>
+							{:else}
+								<Select.Root type="single" value={existingProjectId} onValueChange={(value) => (existingProjectId = value)}>
+									<Select.Trigger id="setup-project" class="w-full">
+										<span>{selectedRemoteProject?.name ?? m.project_secrets_select_project()}</span>
+									</Select.Trigger>
+									<Select.Content>
+										{#each remoteProjects as project (project.id)}
+											<Select.Item value={project.id}>{project.name}</Select.Item>
+										{/each}
+									</Select.Content>
+								</Select.Root>
+							{/if}
+						</div>
+					{/if}
 					<div class="space-y-2">
-						<Label for="setup-project-name">{m.secret_setup_project_name()}</Label>
-						<Input id="setup-project-name" bind:value={projectName} maxlength={64} />
+						<Label for="setup-environment">{m.project_secrets_environment()}</Label>
+						<Select.Root type="single" value={environment} onValueChange={(value) => (environment = value)}>
+							<Select.Trigger id="setup-environment" class="w-full">
+								<span>{environmentOptions.find((option) => option.id === environment)?.name ?? environment}</span>
+							</Select.Trigger>
+							<Select.Content>
+								{#each environmentOptions as option (option.id)}
+									<Select.Item value={option.id}>{option.name}</Select.Item>
+								{/each}
+							</Select.Content>
+						</Select.Root>
 					</div>
-				{:else}
-					<div class="space-y-2">
-						<Label for="setup-project">{m.project_secrets_infisical_project()}</Label>
-						{#if projectsQuery.isError || (projectsQuery.isSuccess && remoteProjects.length === 0)}
+					{#if mode !== 'new-project'}
+						<div class="space-y-2 sm:col-span-2">
+							<Label for="setup-path">{m.project_secrets_path()}</Label>
 							<Input
-								id="setup-project"
+								id="setup-path"
 								mono
-								placeholder={m.project_secrets_infisical_project_id()}
-								bind:value={existingProjectId}
+								bind:value={secretPath}
+								placeholder={mode === 'shared-folder' ? plan.suggestedSecretPath : '/'}
 							/>
-						{:else}
-							<Select.Root type="single" value={existingProjectId} onValueChange={(value) => (existingProjectId = value)}>
-								<Select.Trigger id="setup-project" class="w-full">
-									<span>{selectedRemoteProject?.name ?? m.project_secrets_select_project()}</span>
-								</Select.Trigger>
-								<Select.Content>
-									{#each remoteProjects as project (project.id)}
-										<Select.Item value={project.id}>{project.name}</Select.Item>
-									{/each}
-								</Select.Content>
-							</Select.Root>
-						{/if}
-					</div>
-				{/if}
-				<div class="space-y-2">
-					<Label for="setup-environment">{m.project_secrets_environment()}</Label>
-					<Select.Root type="single" value={environment} onValueChange={(value) => (environment = value)}>
-						<Select.Trigger id="setup-environment" class="w-full">
-							<span>{environmentOptions.find((option) => option.id === environment)?.name ?? environment}</span>
-						</Select.Trigger>
-						<Select.Content>
-							{#each environmentOptions as option (option.id)}
-								<Select.Item value={option.id}>{option.name}</Select.Item>
-							{/each}
-						</Select.Content>
-					</Select.Root>
+						</div>
+					{/if}
 				</div>
-				{#if mode !== 'new-project'}
-					<div class="space-y-2 sm:col-span-2">
-						<Label for="setup-path">{m.project_secrets_path()}</Label>
-						<Input
-							id="setup-path"
-							mono
-							bind:value={secretPath}
-							placeholder={mode === 'shared-folder' ? plan.suggestedSecretPath : '/'}
-						/>
-					</div>
-				{/if}
-			</div>
+			{/if}
 
-			{#if mode === 'new-project' && plan.projectNameTaken}
+			{#if createsContainer && plan.projectNameTaken}
 				<Alert.Root variant="warning-subtle" icon={AlertTriangleIcon} description={m.secret_setup_name_taken()} />
 			{/if}
 			{#if plan.remoteError}
@@ -477,14 +553,18 @@
 		</section>
 
 		<section class="grid gap-3 border-t border-border/50 pt-4">
-			<SwitchWithLabel
-				id="setup-grant"
-				label={m.secret_setup_grant()}
-				description={plan.deployIdentity
-					? m.secret_setup_grant_description({ name: plan.deployIdentity.name })
-					: (plan.deployIdentityError ?? '')}
-				bind:checked={grantDeployIdentity}
-			/>
+			{#if provider === 'infisical'}
+				<SwitchWithLabel
+					id="setup-grant"
+					label={m.secret_setup_grant()}
+					description={plan.deployIdentity
+						? m.secret_setup_grant_description({ name: plan.deployIdentity.name })
+						: (plan.deployIdentityError ?? '')}
+					bind:checked={grantDeployIdentity}
+				/>
+			{:else}
+				<Alert.Root variant="info" icon={AlertIcon} description={m.secret_setup_bitwarden_note()} />
+			{/if}
 			<SwitchWithLabel
 				id="setup-required"
 				label={m.project_secrets_required()}
@@ -575,6 +655,21 @@
 		heading={current.ok ? m.secret_setup_done() : m.secret_setup_partial()}
 		description={current.ok ? m.secret_setup_done_description() : m.secret_setup_partial_description()}
 	/>
+	{#if current.binding && unreferencedKeys.length > 0 && onAddToCompose}
+		<Alert.Root
+			variant="warning-subtle"
+			icon={VariableIcon}
+			heading={m.secret_setup_unreferenced({ count: unreferencedKeys.length })}
+			description={m.secret_setup_unreferenced_description({ keys: unreferencedKeys.join(', ') })}
+		/>
+		<ArcaneButton
+			action="base"
+			tone="outline-primary"
+			icon={VariableIcon}
+			customLabel={m.compose_refs_open()}
+			onclick={() => onAddToCompose?.(unreferencedKeys)}
+		/>
+	{/if}
 	<ol class="grid gap-2">
 		{#each current.steps as step (step.id)}
 			<li class="flex items-start gap-3 rounded-md border border-border/50 p-3">
@@ -596,4 +691,33 @@
 			</li>
 		{/each}
 	</ol>
+{/snippet}
+
+{#snippet bitwardenFields()}
+	<div class="grid gap-4">
+		{#if mode === 'new-folder'}
+			<div class="space-y-2">
+				<Label for="setup-folder-name">{m.secret_setup_folder_name()}</Label>
+				<Input id="setup-folder-name" bind:value={folderName} />
+			</div>
+		{:else}
+			<div class="space-y-2">
+				<Label for="setup-folder">{m.bitwarden_select_folder()}</Label>
+				{#if foldersQuery.isPending}
+					<div class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner class="size-4" />{m.common_loading()}</div>
+				{:else}
+					<Select.Root type="single" value={existingFolderId} onValueChange={(value) => (existingFolderId = value)}>
+						<Select.Trigger id="setup-folder" class="w-full">
+							<span>{remoteFolders.find((folder) => folder.id === existingFolderId)?.name ?? m.bitwarden_select_folder()}</span>
+						</Select.Trigger>
+						<Select.Content>
+							{#each remoteFolders as folder (folder.id)}
+								<Select.Item value={folder.id}>{folder.name}</Select.Item>
+							{/each}
+						</Select.Content>
+					</Select.Root>
+				{/if}
+			</div>
+		{/if}
+	</div>
 {/snippet}

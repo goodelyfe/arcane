@@ -1,8 +1,9 @@
 package secretsource
 
-// Project setup: moves a project's variables into Infisical and binds the
-// project in one step. It writes with the source's setup identity; the
-// binding it creates reads with the source's deploy identity as usual.
+// Project setup: moves a project's variables into a secret manager and binds
+// the project in one step. Infisical writes with the source's setup identity;
+// Bitwarden writes through bw serve into a folder of the signed-in account.
+// The binding it creates reads the usual way.
 
 // Where setup puts the project's secrets.
 const (
@@ -14,6 +15,11 @@ const (
 	// SetupModeSharedFolder uses a folder per Arcane project inside a shared
 	// project, such as /immich in a "homelab" project.
 	SetupModeSharedFolder = "shared-folder"
+	// SetupModeNewFolder creates a Bitwarden folder named after the Arcane
+	// project, with one secure note per variable.
+	SetupModeNewFolder = "new-folder"
+	// SetupModeExistingFolder uses a Bitwarden folder that already exists.
+	SetupModeExistingFolder = "existing-folder"
 )
 
 // How setup fills the secrets it creates.
@@ -62,6 +68,10 @@ type SetupTarget struct {
 	Environment string `json:"environment"`
 	// SecretPath is the folder path. It is created when missing.
 	SecretPath string `json:"secretPath,omitempty"`
+	// FolderName names the Bitwarden folder to create (new-folder).
+	FolderName string `json:"folderName,omitempty"`
+	// FolderID selects an existing Bitwarden folder (existing-folder).
+	FolderID string `json:"folderId,omitempty"`
 }
 
 type SetupPlanRequest struct {
@@ -103,14 +113,18 @@ type SetupIdentity struct {
 
 // SetupPlan is what setup would do, computed without writing anything.
 type SetupPlan struct {
+	// Provider is the source's provider; it decides the available modes.
+	Provider string `json:"provider"`
 	// SuggestedProjectName and SuggestedSecretPath prefill the wizard.
 	SuggestedProjectName string `json:"suggestedProjectName"`
 	SuggestedSecretPath  string `json:"suggestedSecretPath"`
+	SuggestedFolderName  string `json:"suggestedFolderName"`
 	// CanWrite is false when the source has no setup identity.
 	CanWrite  bool            `json:"canWrite"`
 	Variables []SetupVariable `json:"variables"`
-	// ProjectNameTaken is true when a project with the requested name already
-	// exists (new-project), so the wizard can offer to use it instead.
+	// ProjectNameTaken is true when a project or folder with the requested
+	// name already exists (new-project, new-folder), so the wizard can offer
+	// to use it instead.
 	ProjectNameTaken bool `json:"projectNameTaken"`
 	// RemoteError explains why the target could not be read.
 	RemoteError string `json:"remoteError,omitempty"`

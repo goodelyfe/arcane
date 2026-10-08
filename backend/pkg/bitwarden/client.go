@@ -4,6 +4,7 @@
 package bitwarden
 
 import (
+	"bytes"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
@@ -210,15 +211,31 @@ type responseEnvelope struct {
 }
 
 func (c *Client) doInternal(ctx context.Context, method, path string, query url.Values, out any) error {
+	return c.sendInternal(ctx, method, path, query, nil, out)
+}
+
+// sendInternal performs one request; body, when not nil, is sent as JSON.
+func (c *Client) sendInternal(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	endpoint := *c.baseURL
 	endpoint.Path = c.baseURL.Path + path
 	endpoint.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), nil)
+	var reader io.Reader
+	if body != nil {
+		encoded, encodeErr := json.Marshal(body)
+		if encodeErr != nil {
+			return fmt.Errorf("encode bw serve request: %w", encodeErr)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
 	if err != nil {
 		return fmt.Errorf("build bw serve request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
