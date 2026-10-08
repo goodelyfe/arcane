@@ -15,17 +15,20 @@
 	import EnvironmentDestinationSelect from '#lib/components/form/environment-destination-select.svelte';
 	import ProjectTagEditor from '#lib/components/project-tag-editor.svelte';
 	import ResizableSplit from '#lib/components/resizable-split.svelte';
+	import type { NewProjectSecrets } from '#lib/components/secret-sources/compose-refs.js';
+	import NewProjectSecretsSheet from '#lib/components/secret-sources/new-project-secrets-sheet.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Switch } from '#lib/components/ui/switch/index.js';
 	import { WorkspaceDraftState } from '#lib/components/workspace-editor/workspace-draft-state.svelte.js';
 	import WorkspaceFileTreePanel from '#lib/components/workspace-file-tree-panel.svelte';
 	import { useEnvironmentSettings } from '#lib/hooks/use-environment-settings.svelte.js';
-	import { ArrowLeftIcon } from '#lib/icons/index.js';
+	import { ArrowLeftIcon, CloseIcon, LockIcon } from '#lib/icons/index.js';
 	import { AlertIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { containerService } from '#lib/services/container-service.js';
 	import { projectService } from '#lib/services/project-service.js';
+	import { secretSourceService } from '#lib/services/secret-source-service.js';
 	import type { ProjectTag } from '#lib/types/swarm.js';
 	import { activityToastOptions, extractActivityId } from '#lib/utils/activity-toast.js';
 	import { extractApiErrorMessage } from '#lib/utils/api.js';
@@ -75,6 +78,28 @@
 	const canCreateProject = $derived(hasPermission('projects:create', currentEnvId));
 	// Originals are removed from their own environment, not the destination.
 	const canDeleteContainers = $derived(hasPermission('containers:delete', data.sourceEnvironmentId ?? currentEnvId));
+	// Secret bindings are local-environment only for now.
+	const canPickSecrets = $derived(
+		currentEnvId === '0' && hasPermission('secret-sources:list') && hasPermission('secret-sources:read')
+	);
+	let secretsSheetOpen = $state(false);
+	let secretsSheetSession = $state(0);
+	let pendingSecrets = $state<NewProjectSecrets | null>(null);
+
+	function openSecretsSheet() {
+		secretsSheetSession += 1;
+		secretsSheetOpen = true;
+	}
+
+	// Binds the new project to the secrets chosen before it existed. A failure
+	// leaves the project in place and says how to finish from its Secrets tab.
+	async function bindPendingSecrets(projectId: string) {
+		if (!pendingSecrets) return;
+		const result = await tryCatch(secretSourceService.saveBinding(currentEnvId, projectId, pendingSecrets.binding));
+		if (result.error) {
+			toast.error(m.new_project_secrets_bind_failed(), { description: extractApiErrorMessage(result.error) });
+		}
+	}
 	const sourceContainerIds = $derived(data.sourceContainerIds ?? []);
 	// Files are uploaded to the destination, so its limit applies.
 	const destinationSettings = useEnvironmentSettings(() => currentEnvId);
@@ -234,6 +259,7 @@
 						if (error) toast.error(m.containers_remove_failed(), { description: extractApiErrorMessage(error) });
 					}
 				}
+				await bindPendingSecrets(project.id);
 				// fallow-ignore-next-line code-duplication -- create-success handler; navigation target diverges per page
 				goto(environmentHref(`/projects/${project.id}`, destination), { refreshAll: true });
 			}
@@ -363,6 +389,35 @@
 			</div>
 
 			<div class="flex items-center gap-2">
+				{#if canPickSecrets}
+					{#if pendingSecrets}
+						<div class="flex items-center gap-1 rounded-md border border-border/60 py-0.5 pr-0.5 pl-2 text-xs">
+							<LockIcon class="size-3.5 text-primary" />
+							<button type="button" class="hover:underline" onclick={openSecretsSheet}>
+								{m.new_project_secrets_chip({ source: pendingSecrets.sourceName, count: pendingSecrets.keyCount })}
+							</button>
+							<ArcaneButton
+								action="base"
+								tone="ghost"
+								size="icon"
+								class="size-6"
+								icon={CloseIcon}
+								customLabel={m.new_project_secrets_remove()}
+								onclick={() => (pendingSecrets = null)}
+							/>
+						</div>
+					{:else}
+						<ArcaneButton
+							action="base"
+							tone="outline"
+							size="sm"
+							icon={LockIcon}
+							customLabel={m.new_project_secrets_open()}
+							disabled={ui.saving}
+							onclick={openSecretsSheet}
+						/>
+					{/if}
+				{/if}
 				<ComposeCreateMenu
 					tooltipOpen={!effectiveName && !createMenuBusy ? undefined : false}
 					tooltipVisible={effectiveName === ''}
@@ -540,3 +595,16 @@
 	onSelect={composeHandlers.handleTemplateSelect}
 	onDownloadSuccess={refreshAll}
 />
+
+{#if secretsSheetSession > 0}
+	{#key secretsSheetSession}
+		<NewProjectSecretsSheet
+			bind:open={secretsSheetOpen}
+			compose={inputs.composeContent.value}
+			onApply={(compose, secrets) => {
+				form.setValue('composeContent', compose);
+				pendingSecrets = secrets;
+			}}
+		/>
+	{/key}
+{/if}
