@@ -86,6 +86,14 @@ var permissionCatalog = []PermissionCatalogResource{
 		{"delete", PermVariablesDelete, "Delete", ""},
 		{"sync", PermVariablesSync, "Sync", ""},
 	}},
+	{"secret-sources", "Secret Sources", PermissionScopeGlobal, []PermissionCatalogAction{
+		{"list", PermSecretSourcesList, "List", ""},
+		{"read", PermSecretSourcesRead, "Read", "Also allows browsing the projects and folders the source's identity can see"},
+		{"create", PermSecretSourcesCreate, "Create", ""},
+		{"update", PermSecretSourcesUpdate, "Update", ""},
+		{"delete", PermSecretSourcesDelete, "Delete", ""},
+		{"test", PermSecretSourcesTest, "Test", ""},
+	}},
 	{"git-repositories", "Git Repositories", PermissionScopeGlobal, []PermissionCatalogAction{
 		{"list", PermGitReposList, "List", ""},
 		{"read", PermGitReposRead, "Read", ""},

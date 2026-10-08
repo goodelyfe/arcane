@@ -61,6 +61,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/project/children/update"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/project/children/workspace"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/registry"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/libarcane"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/libarcane/timeouts"
@@ -103,6 +104,7 @@ type ProjectService struct {
 	containerRegistryService    *registry.ContainerRegistryService
 	config                      *config.Config
 	RegistryCredentialsProvider func(context.Context) ([]containerregistry.Credential, error)
+	secretEnv                   SecretEnvResolver
 
 	// syncMu serializes SyncProjectsFromFileSystem: its discovery walk and its
 	// cleanup pass must not interleave with another run's.
@@ -122,6 +124,50 @@ type ProjectService struct {
 	// FilesChanged fires with the project ID after project files are saved
 	// through Arcane, so Git backups can react without polling.
 	FilesChanged *concurrency.Signal[string]
+}
+
+// SecretEnvResolver supplies a project's bound secrets to container-creating
+// operations. Implemented by secretsource.SecretSourceService.
+type SecretEnvResolver interface {
+	ResolveDeployEnv(ctx context.Context, project secretsource.ProjectRef, actor usertypes.Actor) (secretsource.DeployEnv, error)
+	RecordDeployed(ctx context.Context, projectID, hash string)
+}
+
+// SetSecretEnvResolver enables deploy-time secret injection.
+func (s *ProjectService) SetSecretEnvResolver(resolver SecretEnvResolver) {
+	s.secretEnv = resolver
+}
+
+// SecretProjectRef describes a project for secret bindings, including the
+// paths needed to report which .env keys a secret overrides.
+func (s *ProjectService) SecretProjectRef(ctx context.Context, projectID string) (secretsource.ProjectRef, error) {
+	proj, found, err := s.FindProjectByID(ctx, projectID)
+	if err != nil {
+		return secretsource.ProjectRef{}, fmt.Errorf("failed to get project: %w", err)
+	}
+	if !found {
+		return secretsource.ProjectRef{}, common.ErrProjectNotFound
+	}
+	projectsDir, dirErr := s.GetProjectsDirectory(ctx)
+	if dirErr != nil {
+		slog.DebugContext(ctx, "projects directory unavailable for secret override check", "error", dirErr)
+		projectsDir = ""
+	}
+	return secretsource.ProjectRef{ID: proj.ID, Name: proj.Name, Path: proj.Path, ProjectsDirectory: projectsDir}, nil
+}
+
+func (s *ProjectService) resolveSecretEnvInternal(ctx context.Context, proj *Project, actor usertypes.Actor) (secretsource.DeployEnv, error) {
+	if s.secretEnv == nil || proj == nil {
+		return secretsource.DeployEnv{}, nil
+	}
+	return s.secretEnv.ResolveDeployEnv(ctx, secretsource.ProjectRef{ID: proj.ID, Name: proj.Name}, actor)
+}
+
+func (s *ProjectService) recordSecretDeployInternal(ctx context.Context, projectID string, secretEnv secretsource.DeployEnv) {
+	if s.secretEnv == nil || secretEnv.Hash == "" {
+		return
+	}
+	s.secretEnv.RecordDeployed(ctx, projectID, secretEnv.Hash)
 }
 
 // EnsureGitOpsProjectLinked persists the bidirectional GitOps/project binding
@@ -487,7 +533,7 @@ func (s *ProjectService) ComposeServiceImage(ctx context.Context, composeName, s
 	if err != nil {
 		return "", "", err
 	}
-	effective, _, err := s.loadComposeProjectForProject(ctx, proj, nil, serviceName)
+	effective, _, err := s.loadComposeProjectForProject(ctx, proj, nil, nil, serviceName)
 	if err != nil {
 		return "", "", fmt.Errorf("load project %s: %w", proj.Name, err)
 	}
@@ -663,7 +709,16 @@ func (s *ProjectService) resolveProjectComposeFile(ctx context.Context, proj *Pr
 // loadComposeProjectForProject loads the executable compose model for
 // proj. prepare is optional and runs before host path translation; deployment
 // paths use it to create missing bind directories, read paths pass nil.
-func (s *ProjectService) loadComposeProjectForProject(ctx context.Context, proj *Project, prepare projects.PrepareProjectFunc, services ...string) (*types.Project, string, error) {
+// loadComposeProjectForProject loads the project's compose model. envOverride
+// carries values that win over every env file; container-creating paths pass
+// the project's bound secrets there so they are never written to disk.
+func (s *ProjectService) loadComposeProjectForProject(
+	ctx context.Context,
+	proj *Project,
+	prepare projects.PrepareProjectFunc,
+	envOverride projects.EnvMap,
+	services ...string,
+) (*types.Project, string, error) {
 	composeFileFullPath, err := s.ResolveProjectComposeFile(ctx, proj)
 	if err != nil {
 		return nil, "", err
@@ -680,7 +735,7 @@ func (s *ProjectService) loadComposeProjectForProject(ctx context.Context, proj 
 
 	autoInjectEnv := kit.ParseOrDefault(cfg.AutoInjectEnv.Value, false, strconv.ParseBool)
 	projectName := projects.NormalizeProjectName(proj.Name)
-	composeProject, loadErr := projects.LoadComposeProject(ctx, composeFileFullPath, projectName, projectsDirectory, autoInjectEnv, pathMapper, nil, nil, false, nil, services, prepare)
+	composeProject, loadErr := projects.LoadComposeProject(ctx, composeFileFullPath, projectName, projectsDirectory, autoInjectEnv, pathMapper, envOverride, nil, false, nil, services, prepare)
 	if loadErr != nil {
 		return nil, "", loadErr
 	}
@@ -985,7 +1040,7 @@ func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID st
 		return err
 	}
 	if discoverTags {
-		effective, _, loadErr := s.loadComposeProjectForProject(ctx, proj, nil, servicesToUpdate...)
+		effective, _, loadErr := s.loadComposeProjectForProject(ctx, proj, nil, nil, servicesToUpdate...)
 		if loadErr != nil {
 			return fmt.Errorf("load project for service image checks: %w", loadErr)
 		}
@@ -1001,16 +1056,21 @@ func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID st
 	}
 	previousStatus := proj.Status
 
+	secretEnv, err := s.resolveSecretEnvInternal(ctx, proj, user)
+	if err != nil {
+		return err
+	}
+
 	// 1. Load project
 	prepare := deployment.PrepareProjectBindDirectories(proj.Path)
-	compProj, _, err := s.loadComposeProjectForProject(ctx, proj, prepare, servicesToUpdate...)
+	compProj, _, err := s.loadComposeProjectForProject(ctx, proj, prepare, secretEnv.Values, servicesToUpdate...)
 	if err != nil {
 		return fmt.Errorf("failed to load compose project: %w", err)
 	}
 	dependents, stoppedDependents := s.deployment.NamespaceDependents(ctx, compProj, servicesToUpdate)
 	if len(dependents)+len(stoppedDependents) > 0 {
 		slog.InfoContext(ctx, "recreating namespace dependents with updated services", "projectId", projectID, "services", servicesToUpdate, "dependents", dependents, "stoppedDependents", stoppedDependents)
-		if compProj, _, err = s.loadComposeProjectForProject(ctx, proj, prepare, slices.Concat(servicesToUpdate, dependents, stoppedDependents)...); err != nil {
+		if compProj, _, err = s.loadComposeProjectForProject(ctx, proj, prepare, secretEnv.Values, slices.Concat(servicesToUpdate, dependents, stoppedDependents)...); err != nil {
 			return fmt.Errorf("failed to load compose project with dependents: %w", err)
 		}
 	}
@@ -1067,6 +1127,12 @@ func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID st
 		},
 	}); updateServicesErr != nil {
 		return updateServicesErr
+	}
+
+	// A partial update leaves other services on their previous secrets, so only
+	// a full update counts as deploying the current secret set.
+	if len(servicesToUpdate) == 0 {
+		s.recordSecretDeployInternal(ctx, projectID, secretEnv)
 	}
 
 	// 6. Finalize status
@@ -1162,6 +1228,13 @@ func (s *ProjectService) DeployProject(ctx context.Context, projectID string, us
 		return resolveProjectComposeFileErr
 	}
 
+	// Fetch bound secrets before touching project status so a required source
+	// that is unreachable fails the deploy without side effects.
+	secretEnv, err := s.resolveSecretEnvInternal(ctx, projectFromDb, user)
+	if err != nil {
+		return err
+	}
+
 	if updateProjectStatusErr := s.updateProjectStatus(ctx, projectID, ProjectStatusDeploying); updateProjectStatusErr != nil {
 		return fmt.Errorf("failed to update project status to deploying: %w", updateProjectStatusErr)
 	}
@@ -1191,7 +1264,7 @@ func (s *ProjectService) DeployProject(ctx context.Context, projectID string, us
 			return s.lifecycleService.runPreDeploy(ctx, projectFromDb, user)
 		},
 		Load: func(ctx context.Context) (*types.Project, error) {
-			model, _, loadComposeProjectForProjectErr := s.loadComposeProjectForProject(ctx, projectFromDb, deployment.PrepareProjectBindDirectories(projectFromDb.Path))
+			model, _, loadComposeProjectForProjectErr := s.loadComposeProjectForProject(ctx, projectFromDb, deployment.PrepareProjectBindDirectories(projectFromDb.Path), secretEnv.Values)
 			if loadComposeProjectForProjectErr == nil {
 				closeSuppression = s.eventService.BeginComposeSuppressionWindow(model.Name)
 			}
@@ -1229,6 +1302,7 @@ func (s *ProjectService) DeployProject(ctx context.Context, projectID string, us
 	if err != nil {
 		return err
 	}
+	s.recordSecretDeployInternal(ctx, projectID, secretEnv)
 
 	metadata := database.JSON{"action": "deploy", "projectID": projectID, "projectName": projectModel.Name}
 	s.logProjectEvent(ctx, event.EventTypeProjectDeploy, projectID, projectModel.Name, user, metadata, "could not log project deployment action")
@@ -1246,7 +1320,7 @@ func (s *ProjectService) DownProject(ctx context.Context, projectID string, user
 		return err
 	}
 
-	proj, _, lerr := s.loadComposeProjectForProject(ctx, projectFromDb, nil)
+	proj, _, lerr := s.loadComposeProjectForProject(ctx, projectFromDb, nil, nil)
 	if lerr != nil {
 		_ = s.updateProjectStatus(ctx, projectID, ProjectStatusRunning)
 		return fmt.Errorf("failed to load compose project: %w", lerr)
@@ -1486,7 +1560,7 @@ func (s *ProjectService) DestroyProject(ctx context.Context, projectID string, r
 	}
 
 	if removeVolumes {
-		if compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil); lerr == nil {
+		if compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil, nil); lerr == nil {
 			defer s.eventService.BeginComposeSuppressionWindow(compProj.Name)()
 			if derr := projects.ComposeDown(ctx, compProj, true); derr != nil {
 				slog.WarnContext(ctx, "failed to remove volumes", "error", derr)
@@ -1580,7 +1654,7 @@ func (s *ProjectService) PullProjectImages(ctx context.Context, projectID string
 		return err
 	}
 
-	compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil)
+	compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil, nil)
 	if lerr != nil {
 		return fmt.Errorf("failed to load compose project: %w", lerr)
 	}
@@ -1601,7 +1675,7 @@ func (s *ProjectService) BuildProjectServices(ctx context.Context, projectID str
 		return err
 	}
 
-	projectModel, _, derr := s.loadComposeProjectForProject(ctx, projectFromDb, nil)
+	projectModel, _, derr := s.loadComposeProjectForProject(ctx, projectFromDb, nil, nil)
 	if derr != nil {
 		return fmt.Errorf("failed to load compose project in %s: %w", projectFromDb.Path, derr)
 	}
@@ -1624,7 +1698,7 @@ func (s *ProjectService) RestartProject(ctx context.Context, projectID string, s
 		return fmt.Errorf("failed to update project status to restarting: %w", updateProjectStatusErr)
 	}
 
-	compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil)
+	compProj, _, lerr := s.loadComposeProjectForProject(ctx, proj, nil, nil)
 	if lerr != nil {
 		_ = s.updateProjectStatus(ctx, projectID, ProjectStatusRunning)
 		return fmt.Errorf("failed to load compose project: %w", lerr)
@@ -2149,7 +2223,7 @@ func (s *ProjectService) enrichComposeDetails(ctx context.Context, proj *Project
 }
 
 func (s *ProjectService) CountServicesFromCompose(ctx context.Context, p Project) (int, error) {
-	proj, _, err := s.loadComposeProjectForProject(ctx, &p, nil)
+	proj, _, err := s.loadComposeProjectForProject(ctx, &p, nil, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -3109,7 +3183,7 @@ func (s *ProjectService) prepareProjectRenameVolumeMigration(
 		return nil, nil
 	}
 
-	composeProject, _, err := s.loadComposeProjectForProject(ctx, target, nil)
+	composeProject, _, err := s.loadComposeProjectForProject(ctx, target, nil, nil)
 	if err != nil {
 		if errors.Is(err, common.ErrProjectComposeFileNotFound) {
 			return nil, nil
@@ -3260,7 +3334,7 @@ func (s *ProjectService) SaveProjectServiceImages(ctx context.Context, projectID
 		return nil, errors.New("tag updates cannot edit a GitOps-managed project; update image tags in the source repository")
 	}
 	// Selecting the changed services keeps profile-gated ones active.
-	effective, _, err := s.loadComposeProjectForProject(ctx, proj, nil, slices.Collect(maps.Keys(changes))...)
+	effective, _, err := s.loadComposeProjectForProject(ctx, proj, nil, nil, slices.Collect(maps.Keys(changes))...)
 	if err != nil {
 		return nil, fmt.Errorf("load project for tag update: %w", err)
 	}
@@ -3388,7 +3462,7 @@ func (s *ProjectService) projectServices(ctx context.Context, projectID string) 
 		return nil, err
 	}
 
-	composeProject, composeFileFullPath, derr := s.loadComposeProjectForProject(ctx, projectFromDb, nil)
+	composeProject, composeFileFullPath, derr := s.loadComposeProjectForProject(ctx, projectFromDb, nil, nil)
 	if errors.Is(derr, common.ErrProjectEnvUnreadable) {
 		// The Compose file cannot be loaded, so derive services from labeled containers.
 		containers, listErr := s.details.ComposeContainers(ctx)

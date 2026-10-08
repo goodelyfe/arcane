@@ -49,6 +49,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/role"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/s3"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/search"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/swarm"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/system"
@@ -225,6 +226,7 @@ type HandlerDeps struct {
 	Dashboard         *dashboard.Module
 	Role              *role.Module
 	Variable          *variable.Module
+	SecretSource      *secretsource.Module
 	Upload            *upload.Module
 }
 
@@ -289,6 +291,7 @@ func SetupAPI(e *echo.Echo, apiGroup *echo.Group, appCtx handlerutil.ActivityApp
 	deps.ContainerRegistry.RegisterRoutes(api)
 	deps.Template.RegisterRoutes(api)
 	deps.Variable.RegisterRoutes(api, cfg)
+	deps.SecretSource.RegisterRoutes(api, cfg)
 	deps.Image.RegisterRoutes(api, appCtx)
 	deps.Upload.RegisterRoutes(api)
 	build.RegisterBuildWorkspaces(api, deps.Build, deps.Upload.Service())
