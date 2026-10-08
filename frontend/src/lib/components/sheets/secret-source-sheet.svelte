@@ -42,6 +42,8 @@
 
 	const isEditMode = $derived(!!sourceToEdit);
 	const hasStoredSecret = $derived(!!sourceToEdit?.hasCredential);
+	const storedSetupClientId = untrack(() => sourceToEdit?.settings.infisical?.setupClientId ?? '');
+	const hasStoredSetupSecret = untrack(() => !!sourceToEdit?.hasSetupCredential);
 
 	// The provider is fixed once a source exists; bindings depend on it.
 	let provider = $state<SecretProvider>(untrack(() => sourceToEdit?.provider ?? 'infisical'));
@@ -67,6 +69,8 @@
 				clientId: z.string().trim(),
 				clientSecret: z.string(),
 				organizationSlug: z.string().trim(),
+				setupClientId: z.string().trim(),
+				setupClientSecret: z.string(),
 				serveUrl: z.string().trim()
 			})
 			.superRefine((data, ctx) => {
@@ -83,6 +87,14 @@
 				if (!sourceToEdit && data.clientSecret === '') {
 					ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_client_secret_required() });
 				}
+				if (data.setupClientId && data.setupClientId === data.clientId) {
+					ctx.addIssue({ code: 'custom', path: ['setupClientId'], message: m.secret_sources_setup_same_identity() });
+				}
+				// A stored setup secret only belongs to the setup identity it was saved with.
+				const keepsSetupSecret = hasStoredSetupSecret && data.setupClientId === storedSetupClientId;
+				if (data.setupClientId && data.setupClientSecret === '' && !keepsSetupSecret) {
+					ctx.addIssue({ code: 'custom', path: ['setupClientSecret'], message: m.secret_sources_client_secret_required() });
+				}
 			})
 	);
 
@@ -94,6 +106,8 @@
 			clientId: sourceToEdit?.settings.infisical?.clientId ?? '',
 			clientSecret: '',
 			organizationSlug: sourceToEdit?.settings.infisical?.organizationSlug ?? '',
+			setupClientId: sourceToEdit?.settings.infisical?.setupClientId ?? '',
+			setupClientSecret: '',
 			serveUrl: sourceToEdit?.settings.bitwarden?.serveUrl ?? ''
 		}))
 	);
@@ -110,7 +124,8 @@
 			infisical: {
 				siteUrl: inputs.siteUrl.value.trim(),
 				clientId: inputs.clientId.value.trim(),
-				organizationSlug: inputs.organizationSlug.value.trim()
+				organizationSlug: inputs.organizationSlug.value.trim(),
+				setupClientId: inputs.setupClientId.value.trim() || undefined
 			}
 		};
 	}
@@ -160,12 +175,14 @@
 
 		const settings = currentSettings();
 		const credential = provider === 'infisical' && data.clientSecret ? data.clientSecret : undefined;
+		const setupCredential =
+			provider === 'infisical' && data.setupClientId && data.setupClientSecret ? data.setupClientSecret : undefined;
 
 		if (isEditMode && sourceToEdit) {
-			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: { name: data.name, settings, credential } });
+			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: { name: data.name, settings, credential, setupCredential } });
 			return;
 		}
-		onSubmit({ mode: 'create', source: { name: data.name, provider, settings, credential } });
+		onSubmit({ mode: 'create', source: { name: data.name, provider, settings, credential, setupCredential } });
 	}
 </script>
 
@@ -241,6 +258,27 @@
 					helpText={m.secret_sources_organization_slug_description()}
 					bind:input={inputs.organizationSlug}
 				/>
+
+				<div class="grid gap-3 rounded-lg border border-border/50 p-3">
+					<div class="space-y-1">
+						<p class="text-sm font-medium">{m.secret_sources_setup_identity()}</p>
+						<p class="text-xs text-muted-foreground">{m.secret_sources_setup_identity_description()}</p>
+					</div>
+					<FormInput
+						label={m.secret_sources_setup_client_id()}
+						type="text"
+						autocomplete="off"
+						bind:input={inputs.setupClientId}
+					/>
+					<FormInput
+						label={m.secret_sources_setup_client_secret()}
+						type="password"
+						autocomplete="new-password"
+						placeholder={hasStoredSetupSecret ? m.common_keep_placeholder() : ''}
+						helpText={m.secret_sources_setup_clear_hint()}
+						bind:input={inputs.setupClientSecret}
+					/>
+				</div>
 			{/if}
 
 			<div class="space-y-3 border-t border-border/50 pt-4">

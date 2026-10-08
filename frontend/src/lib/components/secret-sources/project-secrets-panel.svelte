@@ -10,7 +10,7 @@
 	import { Label } from '#lib/components/ui/label/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, ShieldCheckIcon } from '#lib/icons/index.js';
+	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, ShieldCheckIcon, ZapIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
@@ -29,6 +29,7 @@
 
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
+	import SecretSetupSheet from './secret-setup-sheet.svelte';
 
 	let {
 		environmentId,
@@ -59,6 +60,17 @@
 		enabled: canListSources
 	}));
 	const sources = $derived(sourcesQuery.data ?? []);
+	const infisicalSources = $derived(sources.filter((source) => source.provider === 'infisical'));
+	const canSetup = $derived(canEdit && hasPermission('secret-sources:update'));
+
+	// ---- Guided setup ----
+	let setupOpen = $state(false);
+	let setupSession = $state(0);
+
+	function openSetup() {
+		setupSession += 1;
+		setupOpen = true;
+	}
 
 	// ---- Editor state ----
 	let editing = $state(false);
@@ -233,14 +245,25 @@
 							customLabel={m.secret_sources_title()}
 						/>
 					{:else}
-						<ArcaneButton
-							action="base"
-							tone="outline-primary"
-							icon={LockIcon}
-							customLabel={m.project_secrets_bind()}
-							disabled={!canListSources}
-							onclick={startEditing}
-						/>
+						<div class="flex flex-wrap justify-center gap-2">
+							{#if canSetup && infisicalSources.length > 0}
+								<ArcaneButton
+									action="base"
+									icon={ZapIcon}
+									customLabel={m.secret_setup_open()}
+									disabled={!canListSources}
+									onclick={openSetup}
+								/>
+							{/if}
+							<ArcaneButton
+								action="base"
+								tone="outline-primary"
+								icon={LockIcon}
+								customLabel={m.project_secrets_bind()}
+								disabled={!canListSources}
+								onclick={startEditing}
+							/>
+						</div>
 					{/if}
 				</Empty.Content>
 			{/if}
@@ -248,6 +271,21 @@
 	</div>
 {:else}
 	{@render summary(binding)}
+{/if}
+
+{#if setupSession > 0}
+	{#key setupSession}
+		<SecretSetupSheet
+			bind:open={setupOpen}
+			{environmentId}
+			{projectId}
+			sources={infisicalSources}
+			onDone={async () => {
+				checkResult = null;
+				await invalidateBinding();
+			}}
+		/>
+	{/key}
 {/if}
 
 {#snippet summary(current: ProjectSecretBinding)}
@@ -301,6 +339,17 @@
 					/>
 				{/if}
 				{#if canEdit}
+					{#if canSetup && current.provider === 'infisical' && infisicalSources.length > 0}
+						<ArcaneButton
+							action="base"
+							tone="outline"
+							size="sm"
+							icon={ZapIcon}
+							customLabel={m.secret_setup_open_again()}
+							disabled={!canListSources}
+							onclick={openSetup}
+						/>
+					{/if}
 					<ArcaneButton action="edit" tone="outline" size="sm" onclick={startEditing} disabled={!canListSources} />
 					<ArcaneButton
 						action="remove"
