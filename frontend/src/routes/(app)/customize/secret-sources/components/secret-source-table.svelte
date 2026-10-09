@@ -113,7 +113,7 @@
 
 {#snippet NameCell({ item }: { item: SecretSource })}
 	<div class="flex items-center gap-2">
-		<ProviderIcon provider={item.provider} />
+		<ProviderIcon provider={item.provider} class="size-6 rounded-md p-1" />
 		<span class="font-medium">{item.name}</span>
 		<Badge variant={providerBadges[item.provider]} size="sm">{providerLabel(item.provider)}</Badge>
 	</div>
