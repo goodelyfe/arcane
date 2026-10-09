@@ -15,6 +15,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/common"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/setupplan"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/vault"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
 
@@ -141,7 +142,7 @@ func (s *SecretSourceService) PlanSetup(ctx context.Context, project ProjectRef,
 	plan := secretsourcetypes.SetupPlan{
 		Provider:             setupCtx.source.Provider,
 		SuggestedProjectName: project.Name,
-		SuggestedSecretPath:  infisical.SuggestFolder(project.Name),
+		SuggestedSecretPath:  suggestedPathInternal(setupCtx.source.Provider, project.Name),
 		SuggestedFolderName:  project.Name,
 		CanWrite:             setupCtx.writer != nil,
 		Variables:            setupCtx.variables,
@@ -561,4 +562,13 @@ func joinNotesInternal(detail string, notes []string) string {
 		return detail
 	}
 	return detail + ". " + strings.Join(notes, ". ")
+}
+
+// suggestedPathInternal proposes where a project's secrets go: a folder for
+// Infisical, a KV path for Vault/OpenBao.
+func suggestedPathInternal(providerName, projectName string) string {
+	if providerName == secretsourcetypes.ProviderVault {
+		return vault.SuggestPath(projectName)
+	}
+	return infisical.SuggestFolder(projectName)
 }

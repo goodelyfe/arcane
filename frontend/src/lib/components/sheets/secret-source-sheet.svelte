@@ -4,6 +4,8 @@
 
 	import { ArcaneButton } from '#lib/components/arcane-button/index.js';
 	import FormInput from '#lib/components/form/form-input.svelte';
+	import SwitchWithLabel from '#lib/components/form/labeled-switch.svelte';
+	import { providerOptions } from '#lib/components/secret-sources/providers.js';
 	import SheetFooterActions from '#lib/components/sheets/sheet-footer-actions.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Label } from '#lib/components/ui/label/index.js';
@@ -14,6 +16,7 @@
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
 	import type {
 		SecretProvider,
+		VaultAuthMethod,
 		SecretSource,
 		SecretSourceCreateDto,
 		SecretSourceTestResult,
@@ -48,18 +51,30 @@
 	// The provider is fixed once a source exists; bindings depend on it.
 	let provider = $state<SecretProvider>(untrack(() => sourceToEdit?.provider ?? 'infisical'));
 
-	const providers: { value: SecretProvider; label: () => string; description: () => string }[] = [
-		{
-			value: 'infisical',
-			label: m.secret_sources_provider_infisical,
-			description: m.secret_sources_provider_infisical_description
-		},
-		{
-			value: 'bitwarden',
-			label: m.secret_sources_provider_bitwarden,
-			description: m.secret_sources_provider_bitwarden_description
+	const providers = providerOptions;
+	const storedVault = untrack(() => sourceToEdit?.settings.vault);
+	let vaultAuth = $state<VaultAuthMethod>(storedVault?.authMethod ?? 'token');
+	let vaultSetupToken = $state(!!storedVault?.setupToken);
+	const storedVaultSetupToken = !!storedVault?.setupToken && untrack(() => !!sourceToEdit?.hasSetupCredential);
+
+	// Everything except Bitwarden stores a credential; for HTTP it is optional.
+	const usesCredential = $derived(provider !== 'bitwarden');
+	const credentialRequired = $derived(provider !== 'bitwarden' && provider !== 'http');
+
+	function credentialLabel(current: SecretProvider): string {
+		switch (current) {
+			case 'vault':
+				return vaultAuth === 'approle' ? m.vault_secret_id() : m.vault_token();
+			case 'doppler':
+				return m.doppler_token();
+			case 'onepassword':
+				return m.onepassword_connect_token();
+			case 'http':
+				return m.http_bearer_token();
+			default:
+				return m.secret_sources_client_secret();
 		}
-	];
+	}
 
 	const formSchema = untrack(() =>
 		z
@@ -71,14 +86,48 @@
 				organizationSlug: z.string().trim(),
 				setupClientId: z.string().trim(),
 				setupClientSecret: z.string(),
-				serveUrl: z.string().trim()
+				serveUrl: z.string().trim(),
+				address: z.string().trim(),
+				namespace: z.string().trim(),
+				roleId: z.string().trim(),
+				appRoleMount: z.string().trim(),
+				setupToken: z.string(),
+				apiUrl: z.string().trim(),
+				serverUrl: z.string().trim(),
+				baseUrl: z.string().trim()
 			})
 			.superRefine((data, ctx) => {
-				if (provider === 'bitwarden') {
-					if (!data.serveUrl) {
-						ctx.addIssue({ code: 'custom', path: ['serveUrl'], message: m.secret_sources_serve_url_required() });
+				const requireField = (field: 'serveUrl' | 'address' | 'serverUrl' | 'baseUrl' | 'roleId', message: string) => {
+					if (!data[field]) ctx.addIssue({ code: 'custom', path: [field], message });
+				};
+				// Editing keeps the stored credential when the field is left empty.
+				const requireCredential = () => {
+					if (!sourceToEdit && data.clientSecret === '') {
+						ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_required() });
 					}
-					return;
+				};
+				switch (provider) {
+					case 'bitwarden':
+						requireField('serveUrl', m.secret_sources_serve_url_required());
+						return;
+					case 'vault':
+						requireField('address', m.secret_sources_url_required());
+						if (vaultAuth === 'approle') requireField('roleId', m.vault_role_id_required());
+						requireCredential();
+						if (vaultSetupToken && data.setupToken === '' && !storedVaultSetupToken) {
+							ctx.addIssue({ code: 'custom', path: ['setupToken'], message: m.secret_sources_credential_required() });
+						}
+						return;
+					case 'doppler':
+						requireCredential();
+						return;
+					case 'onepassword':
+						requireField('serverUrl', m.secret_sources_url_required());
+						requireCredential();
+						return;
+					case 'http':
+						requireField('baseUrl', m.secret_sources_url_required());
+						return;
 				}
 				if (!data.clientId) {
 					ctx.addIssue({ code: 'custom', path: ['clientId'], message: m.secret_sources_client_id_required() });
@@ -108,7 +157,15 @@
 			organizationSlug: sourceToEdit?.settings.infisical?.organizationSlug ?? '',
 			setupClientId: sourceToEdit?.settings.infisical?.setupClientId ?? '',
 			setupClientSecret: '',
-			serveUrl: sourceToEdit?.settings.bitwarden?.serveUrl ?? ''
+			serveUrl: sourceToEdit?.settings.bitwarden?.serveUrl ?? '',
+			address: sourceToEdit?.settings.vault?.address ?? '',
+			namespace: sourceToEdit?.settings.vault?.namespace ?? '',
+			roleId: sourceToEdit?.settings.vault?.roleId ?? '',
+			appRoleMount: sourceToEdit?.settings.vault?.appRoleMount ?? '',
+			setupToken: '',
+			apiUrl: sourceToEdit?.settings.doppler?.apiUrl ?? '',
+			serverUrl: sourceToEdit?.settings.onepassword?.serverUrl ?? '',
+			baseUrl: sourceToEdit?.settings.http?.baseUrl ?? ''
 		}))
 	);
 	let inputs = $derived(form.inputs);
@@ -117,8 +174,26 @@
 	let testResult = $state<SecretSourceTestResult | null>(null);
 
 	function currentSettings(): SourceSettings {
-		if (provider === 'bitwarden') {
-			return { bitwarden: { serveUrl: inputs.serveUrl.value.trim() } };
+		switch (provider) {
+			case 'bitwarden':
+				return { bitwarden: { serveUrl: inputs.serveUrl.value.trim() } };
+			case 'vault':
+				return {
+					vault: {
+						address: inputs.address.value.trim(),
+						namespace: inputs.namespace.value.trim() || undefined,
+						authMethod: vaultAuth,
+						roleId: vaultAuth === 'approle' ? inputs.roleId.value.trim() : undefined,
+						appRoleMount: vaultAuth === 'approle' ? inputs.appRoleMount.value.trim() || undefined : undefined,
+						setupToken: vaultSetupToken || undefined
+					}
+				};
+			case 'doppler':
+				return { doppler: { apiUrl: inputs.apiUrl.value.trim() || undefined } };
+			case 'onepassword':
+				return { onepassword: { serverUrl: inputs.serverUrl.value.trim() } };
+			case 'http':
+				return { http: { baseUrl: inputs.baseUrl.value.trim() } };
 		}
 		return {
 			infisical: {
@@ -131,18 +206,42 @@
 	}
 
 	function visibleLabel(result: SecretSourceTestResult): string {
-		return provider === 'bitwarden'
-			? m.secret_sources_test_visible_items({ count: result.visibleCount })
-			: result.visibleCount === 1
-				? m.secret_sources_test_visible_projects_one()
-				: m.secret_sources_test_visible_projects({ count: result.visibleCount });
+		switch (provider) {
+			case 'bitwarden':
+				return m.secret_sources_test_visible_items({ count: result.visibleCount });
+			case 'vault':
+				return m.secret_sources_test_visible_mounts({ count: result.visibleCount });
+			case 'onepassword':
+				return m.secret_sources_test_visible_vaults({ count: result.visibleCount });
+			default:
+				return result.visibleCount === 1
+					? m.secret_sources_test_visible_projects_one()
+					: m.secret_sources_test_visible_projects({ count: result.visibleCount });
+		}
 	}
 
 	async function testConnection() {
 		testResult = null;
+		const missing = (input: { value: string; error: string | null }, message: string) => {
+			if (input.value.trim()) return false;
+			input.error = message;
+			return true;
+		};
+		const missingCredential = () => !inputs.clientSecret.value && !hasStoredSecret && credentialRequired;
 		if (provider === 'bitwarden') {
-			if (!inputs.serveUrl.value.trim()) {
-				inputs.serveUrl.error = m.secret_sources_serve_url_required();
+			if (missing(inputs.serveUrl, m.secret_sources_serve_url_required())) return;
+		} else if (provider !== 'infisical') {
+			const urlInput =
+				provider === 'vault'
+					? inputs.address
+					: provider === 'onepassword'
+						? inputs.serverUrl
+						: provider === 'http'
+							? inputs.baseUrl
+							: null;
+			if (urlInput && missing(urlInput, m.secret_sources_url_required())) return;
+			if (missingCredential()) {
+				inputs.clientSecret.error = m.secret_sources_credential_required();
 				return;
 			}
 		} else {
@@ -162,7 +261,7 @@
 				sourceId: sourceToEdit?.id,
 				provider,
 				settings: currentSettings(),
-				credential: provider === 'infisical' ? inputs.clientSecret.value || undefined : undefined
+				credential: usesCredential ? inputs.clientSecret.value || undefined : undefined
 			})
 		);
 		testing = false;
@@ -176,9 +275,10 @@
 		if (!data) return;
 
 		const settings = currentSettings();
-		const credential = provider === 'infisical' && data.clientSecret ? data.clientSecret : undefined;
-		const setupCredential =
-			provider === 'infisical' && data.setupClientId && data.setupClientSecret ? data.setupClientSecret : undefined;
+		const credential = usesCredential && data.clientSecret ? data.clientSecret : undefined;
+		let setupCredential: string | undefined;
+		if (provider === 'infisical' && data.setupClientId && data.setupClientSecret) setupCredential = data.setupClientSecret;
+		if (provider === 'vault' && vaultSetupToken && data.setupToken) setupCredential = data.setupToken;
 
 		if (isEditMode && sourceToEdit) {
 			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: { name: data.name, settings, credential, setupCredential } });
@@ -235,6 +335,119 @@
 					bind:input={inputs.serveUrl}
 				/>
 				<Alert.Root variant="info" icon={AlertIcon} description={m.secret_sources_bitwarden_hardening()} />
+			{:else if provider === 'vault'}
+				<FormInput
+					label={m.vault_address()}
+					type="text"
+					placeholder="http://openbao:8200"
+					helpText={m.vault_address_description()}
+					bind:input={inputs.address}
+				/>
+				<div class="space-y-2">
+					<Label class="mb-0">{m.vault_auth_method()}</Label>
+					<RadioGroup.Root
+						class="mt-2"
+						value={vaultAuth}
+						onValueChange={(value) => {
+							vaultAuth = value as VaultAuthMethod;
+							testResult = null;
+						}}
+					>
+						<div class="grid grid-cols-2 gap-2">
+							{#each [{ value: 'token', label: m.vault_auth_token() }, { value: 'approle', label: m.vault_auth_approle() }] as option (option.value)}
+								<label class="flex cursor-pointer items-center gap-2 rounded-md border border-border/50 p-2.5 hover:bg-accent/40">
+									<RadioGroup.Item value={option.value} />
+									<span class="text-sm">{option.label}</span>
+								</label>
+							{/each}
+						</div>
+					</RadioGroup.Root>
+				</div>
+				{#if vaultAuth === 'approle'}
+					<FormInput label={m.vault_role_id()} type="text" autocomplete="off" bind:input={inputs.roleId} />
+				{/if}
+				<FormInput
+					label={credentialLabel(provider)}
+					type="password"
+					autocomplete="new-password"
+					placeholder={hasStoredSecret ? m.common_keep_placeholder() : ''}
+					helpText={m.vault_token_description()}
+					bind:input={inputs.clientSecret}
+				/>
+				{#if vaultAuth === 'approle'}
+					<FormInput label={m.vault_approle_mount()} type="text" placeholder="approle" bind:input={inputs.appRoleMount} />
+				{/if}
+				<FormInput
+					label={m.vault_namespace()}
+					type="text"
+					helpText={m.vault_namespace_description()}
+					bind:input={inputs.namespace}
+				/>
+				<div class="grid gap-3 rounded-lg border border-border/50 p-3">
+					<SwitchWithLabel
+						id="vault-setup-token"
+						label={m.vault_setup_token()}
+						description={m.vault_setup_token_description()}
+						bind:checked={vaultSetupToken}
+					/>
+					{#if vaultSetupToken}
+						<FormInput
+							label={m.vault_setup_token_value()}
+							type="password"
+							autocomplete="new-password"
+							placeholder={storedVaultSetupToken ? m.common_keep_placeholder() : ''}
+							bind:input={inputs.setupToken}
+						/>
+					{/if}
+				</div>
+			{:else if provider === 'doppler'}
+				<FormInput
+					label={credentialLabel(provider)}
+					type="password"
+					autocomplete="new-password"
+					placeholder={hasStoredSecret ? m.common_keep_placeholder() : 'dp.st.prd.…'}
+					helpText={m.doppler_token_description()}
+					bind:input={inputs.clientSecret}
+				/>
+				<FormInput
+					label={m.doppler_api_url()}
+					type="text"
+					placeholder="https://api.doppler.com"
+					helpText={m.doppler_api_url_description()}
+					bind:input={inputs.apiUrl}
+				/>
+			{:else if provider === 'onepassword'}
+				<FormInput
+					label={m.onepassword_server_url()}
+					type="text"
+					placeholder="http://op-connect-api:8080"
+					helpText={m.onepassword_server_url_description()}
+					bind:input={inputs.serverUrl}
+				/>
+				<FormInput
+					label={credentialLabel(provider)}
+					type="password"
+					autocomplete="new-password"
+					placeholder={hasStoredSecret ? m.common_keep_placeholder() : ''}
+					bind:input={inputs.clientSecret}
+				/>
+			{:else if provider === 'http'}
+				<FormInput
+					label={m.http_base_url()}
+					type="text"
+					placeholder="http://sops-kit:8080/secrets"
+					helpText={m.http_base_url_description()}
+					bind:input={inputs.baseUrl}
+				/>
+				<FormInput
+					label={credentialLabel(provider)}
+					type="password"
+					autocomplete="new-password"
+					placeholder={hasStoredSecret ? m.common_keep_placeholder() : m.http_token_optional()}
+					helpText={m.http_bearer_token_description()}
+					bind:input={inputs.clientSecret}
+				/>
+				<Alert.Root variant="info" icon={AlertIcon} description={m.http_contract_hint({ example: '{"DB_PASSWORD": "…"}' })} />
 			{:else}
 				<FormInput
 					label={m.secret_sources_site_url()}
