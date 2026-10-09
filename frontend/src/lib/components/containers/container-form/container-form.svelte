@@ -9,7 +9,10 @@
 	import SearchableSelect from '#lib/components/form/searchable-select.svelte';
 	import SelectWithLabel from '#lib/components/form/select-with-label.svelte';
 	import VolumeMountEditor from '#lib/components/form/volume-mount-editor.svelte';
+	import ContainerSecretsSheet from '#lib/components/secret-sources/container-secrets-sheet.svelte';
+	import ProviderIcon from '#lib/components/secret-sources/provider-icon.svelte';
 	import { TabBar, type TabItem } from '#lib/components/tab-bar/index.js';
+	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Checkbox } from '#lib/components/ui/checkbox/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
@@ -23,6 +26,7 @@
 	import { volumeService } from '#lib/services/volume-service.js';
 	import { environmentStore } from '#lib/stores/environment.store.svelte.js';
 	import type { ImageSearchResultDto } from '#lib/types/docker.js';
+	import { hasPermission } from '#lib/utils/auth.js';
 	import { preventDefault, createForm } from '#lib/utils/settings.svelte.js';
 	import { tryCatch } from '#lib/utils/try-catch.js';
 
@@ -48,6 +52,16 @@
 	// svelte-ignore state_referenced_locally
 	const inputs = form.inputs;
 	const envId = $derived(environmentStore.selected?.id || '0');
+	// Secret sources are local-environment only; reading one for a container needs secret-sources:use.
+	const canFillSecrets = $derived(
+		mode === 'create' &&
+			envId === '0' &&
+			hasPermission('secret-sources:list') &&
+			hasPermission('secret-sources:read') &&
+			hasPermission('secret-sources:use')
+	);
+	let secretsSheetOpen = $state(false);
+	let secretsSheetSession = $state(0);
 
 	let selectedTab = $state('general');
 
@@ -269,6 +283,47 @@
 						{@render groupTitle(m.common_environment_variables())}
 						<KeyValueEditor bind:rows={rows.env} disabled={submitting} />
 					</div>
+					{#if canFillSecrets}
+						<div class="space-y-4">
+							{@render groupTitle(m.container_secrets_section())}
+							<p class="text-sm text-muted-foreground">{m.container_secrets_hint()}</p>
+							{#each rows.secretSources as fill, index (index)}
+								<div class="flex flex-wrap items-center gap-3 rounded-lg border border-border/60 p-3">
+									<ProviderIcon provider={fill.provider} class="size-8 rounded-md p-1.5" />
+									<div class="min-w-0 flex-1">
+										<p class="text-sm font-medium">{fill.sourceName}</p>
+										<p class="truncate font-mono text-xs text-muted-foreground">
+											{fill.description} · {fill.keys.length === 1
+												? m.project_secrets_keys_count_one()
+												: m.project_secrets_keys_count({ count: fill.keys.length })}
+										</p>
+									</div>
+									<ArcaneButton
+										action="remove"
+										tone="outline-destructive"
+										size="sm"
+										disabled={submitting}
+										onclick={() => (rows.secretSources = rows.secretSources.filter((_, i) => i !== index))}
+									/>
+								</div>
+							{/each}
+							{#if rows.secretSources.length > 0}
+								<Alert.Root variant="info" description={m.container_secrets_once()} />
+							{/if}
+							<ArcaneButton
+								action="base"
+								tone="outline-primary"
+								size="sm"
+								icon={VariableIcon}
+								customLabel={m.container_secrets_add()}
+								disabled={submitting || rows.secretSources.length >= 10}
+								onclick={() => {
+									secretsSheetSession += 1;
+									secretsSheetOpen = true;
+								}}
+							/>
+						</div>
+					{/if}
 					<div class="space-y-4">
 						{@render groupTitle(m.common_labels())}
 						<KeyValueEditor
@@ -447,3 +502,9 @@
 		/>
 	</div>
 </form>
+
+{#if secretsSheetSession > 0}
+	{#key secretsSheetSession}
+		<ContainerSecretsSheet bind:open={secretsSheetOpen} onAdd={(fill) => (rows.secretSources = [...rows.secretSources, fill])} />
+	{/key}
+{/if}

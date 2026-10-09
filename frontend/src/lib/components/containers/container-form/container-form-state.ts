@@ -16,6 +16,7 @@ import type {
 	MountDto,
 	PortBinding
 } from '#lib/types/docker.js';
+import type { SecretProvider, SecretTargetRef } from '#lib/types/secret-source.js';
 
 // Common Linux capabilities offered by the cap add/drop selectors.
 export const LINUX_CAPABILITIES = [
@@ -97,6 +98,15 @@ export type ContainerFormRows = {
 	networks: NetworkAttachmentRow[];
 	capAdd: string[];
 	capDrop: string[];
+	// Create only: secret source targets that fill the environment once.
+	secretSources: ContainerSecretFill[];
+};
+
+export type ContainerSecretFill = SecretTargetRef & {
+	sourceName: string;
+	provider: SecretProvider;
+	description: string;
+	keys: string[];
 };
 
 // Splits a command string into words, honoring single/double quotes so
@@ -142,7 +152,7 @@ export function emptyContainerFormValues(): ContainerFormValues {
 }
 
 export function emptyContainerFormRows(): ContainerFormRows {
-	return { env: [], labels: [], ports: [], volumes: [], networks: [], capAdd: [], capDrop: [] };
+	return { env: [], labels: [], ports: [], volumes: [], networks: [], capAdd: [], capDrop: [], secretSources: [] };
 }
 
 function healthModeFromConfig(hc: ContainerHealthcheckCreate | undefined): ContainerFormValues['healthMode'] {
@@ -373,6 +383,8 @@ export function toCreateRequest(values: ContainerFormValues, rows: ContainerForm
 		workingDir: values.workingDir.trim() || undefined,
 		user: values.user.trim() || undefined,
 		env: env.length > 0 ? env : undefined,
+		secretSources:
+			rows.secretSources.length > 0 ? rows.secretSources.map(({ sourceId, target }) => ({ sourceId, target })) : undefined,
 		labels: Object.keys(labels).length > 0 ? labels : undefined,
 		healthcheck: buildHealthcheck(values),
 		hostConfig,
