@@ -383,7 +383,9 @@
 						<div class="flex items-center gap-1 rounded-md border border-border/60 py-0.5 pr-0.5 pl-2 text-xs">
 							<LockIcon class="size-3.5 text-primary" />
 							<button type="button" class="hover:underline" onclick={openSecretsSheet}>
-								{m.new_project_secrets_chip({ source: pendingSecrets.sourceName, count: pendingSecrets.keyCount })}
+								{pendingSecrets.keyCount === 1
+									? m.new_project_secrets_chip_one({ source: pendingSecrets.sourceName })
+									: m.new_project_secrets_chip({ source: pendingSecrets.sourceName, count: pendingSecrets.keyCount })}
 							</button>
 							<ArcaneButton
 								action="base"
