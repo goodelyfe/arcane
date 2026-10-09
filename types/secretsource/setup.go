@@ -59,13 +59,13 @@ const (
 
 // SetupTarget is where setup writes in Infisical.
 type SetupTarget struct {
-	Mode string `json:"mode"`
+	Mode string `json:"mode,omitempty"`
 	// ProjectName names the project to create (new-project).
 	ProjectName string `json:"projectName,omitempty"`
 	// ProjectID selects an existing project (existing-project, shared-folder).
 	ProjectID string `json:"projectId,omitempty"`
 	// Environment is the environment slug, such as prod.
-	Environment string `json:"environment"`
+	Environment string `json:"environment,omitempty"`
 	// SecretPath is the folder path. It is created when missing.
 	SecretPath string `json:"secretPath,omitempty"`
 	// FolderName names the Bitwarden folder to create (new-folder).
@@ -75,8 +75,11 @@ type SetupTarget struct {
 }
 
 type SetupPlanRequest struct {
-	SourceID string      `json:"sourceId"`
-	Target   SetupTarget `json:"target"`
+	SourceID string `json:"sourceId"`
+	// Target is optional: without it the plan lists the project's variables
+	// only. Bitwarden targets have no environment, so neither field is
+	// required by the schema; the provider validates the target instead.
+	Target SetupTarget `json:"target,omitzero"`
 }
 
 // SetupVariable describes one variable the project uses. It never carries a
