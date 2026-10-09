@@ -1,0 +1,281 @@
+// Package vault is a small client for the KV secrets engine of HashiCorp Vault
+// and OpenBao, which share the same HTTP API. It supports token and AppRole
+// authentication, KV version 1 and 2, and an optional namespace.
+package vault
+
+import (
+	"context"
+	"encoding/json/jsontext"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/getarcaneapp/arcane/backend/v2/pkg/secretapi"
+)
+
+// Authentication methods.
+const (
+	AuthToken   = "token"
+	AuthAppRole = "approle"
+)
+
+// serviceName names the server in errors.
+const serviceName = "Vault/OpenBao"
+
+// tokenRefreshMargin renews an AppRole token this long before it expires.
+const tokenRefreshMargin = 30 * time.Second
+
+// Config describes how to reach and log in to one server.
+type Config struct {
+	Address   string
+	Namespace string
+	// AuthMethod is AuthToken or AuthAppRole.
+	AuthMethod string
+	// RoleID and AppRoleMount are used with AuthAppRole.
+	RoleID       string
+	AppRoleMount string
+	// Secret is the token (AuthToken) or the AppRole secret ID.
+	Secret string
+}
+
+// TokenInfo describes the token the client uses.
+type TokenInfo struct {
+	DisplayName string   `json:"display_name"`
+	Policies    []string `json:"policies"`
+	TTL         int64    `json:"ttl"`
+}
+
+// Mount is a KV mount visible to the token.
+type Mount struct {
+	Path    string
+	Type    string
+	Version string
+}
+
+// loginRequestKey marks the context of the AppRole login request, which is
+// sent without a token.
+type loginRequestKey struct{}
+
+// Client talks to one Vault or OpenBao server. It is safe for concurrent use.
+type Client struct {
+	api    *secretapi.Requester
+	config Config
+
+	mu        sync.Mutex
+	token     string
+	expiresAt time.Time
+}
+
+// ParseAddress validates a server address such as http://openbao:8200.
+func ParseAddress(raw string) (*url.URL, error) {
+	return secretapi.ParseBaseURL(raw, "the server address", "http://openbao:8200")
+}
+
+// NewClient validates config and returns a client. httpClient may be nil.
+func NewClient(httpClient *http.Client, config Config) (*Client, error) {
+	base, err := ParseAddress(config.Address)
+	if err != nil {
+		return nil, err
+	}
+	config.AuthMethod = strings.TrimSpace(config.AuthMethod)
+	if config.AuthMethod == "" {
+		config.AuthMethod = AuthToken
+	}
+	switch config.AuthMethod {
+	case AuthToken:
+	case AuthAppRole:
+		if strings.TrimSpace(config.RoleID) == "" {
+			return nil, errors.New("an AppRole role ID is required")
+		}
+		if strings.TrimSpace(config.AppRoleMount) == "" {
+			config.AppRoleMount = "approle"
+		}
+	default:
+		return nil, fmt.Errorf("unknown auth method %q; use token or approle", config.AuthMethod)
+	}
+	if strings.TrimSpace(config.Secret) == "" {
+		if config.AuthMethod == AuthAppRole {
+			return nil, errors.New("an AppRole secret ID is required")
+		}
+		return nil, errors.New("a token is required")
+	}
+
+	client := &Client{config: config}
+	client.api = secretapi.NewRequester(httpClient, base, serviceName)
+	client.api.Authorize = client.authorizeInternal
+	return client, nil
+}
+
+func (c *Client) authorizeInternal(ctx context.Context, req *http.Request) error {
+	if c.config.Namespace != "" {
+		req.Header.Set("X-Vault-Namespace", c.config.Namespace)
+	}
+	// The AppRole login itself carries no token.
+	if skip, _ := ctx.Value(loginRequestKey{}).(bool); skip {
+		return nil
+	}
+	token, err := c.tokenInternal(ctx)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Vault-Token", token)
+	return nil
+}
+
+func (c *Client) tokenInternal(ctx context.Context) (string, error) {
+	if c.config.AuthMethod == AuthToken {
+		return c.config.Secret, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.token != "" && (c.expiresAt.IsZero() || time.Now().Before(c.expiresAt)) {
+		return c.token, nil
+	}
+
+	var resp struct {
+		Auth *struct {
+			ClientToken   string `json:"client_token"`
+			LeaseDuration int64  `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	body := map[string]string{"role_id": c.config.RoleID, "secret_id": c.config.Secret}
+	path := "/v1/auth/" + secretapi.PathEscapeSegments(c.config.AppRoleMount) + "/login"
+	loginCtx := context.WithValue(ctx, loginRequestKey{}, true)
+	if err := c.api.Do(loginCtx, http.MethodPost, path, nil, body, &resp); err != nil {
+		return "", fmt.Errorf("AppRole login failed: %w", err)
+	}
+	if resp.Auth == nil || resp.Auth.ClientToken == "" {
+		return "", errors.New("AppRole login returned no token")
+	}
+	c.token = resp.Auth.ClientToken
+	c.expiresAt = time.Time{}
+	if resp.Auth.LeaseDuration > 0 {
+		c.expiresAt = time.Now().Add(time.Duration(resp.Auth.LeaseDuration)*time.Second - tokenRefreshMargin)
+	}
+	return c.token, nil
+}
+
+// LookupSelf describes the token, which also proves it works.
+func (c *Client) LookupSelf(ctx context.Context) (*TokenInfo, error) {
+	var resp struct {
+		Data TokenInfo `json:"data"`
+	}
+	if err := c.api.Do(ctx, http.MethodGet, "/v1/auth/token/lookup-self", nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Data, nil
+}
+
+// KVMounts lists the KV mounts the token can see. Servers that hide this
+// endpoint return an error; callers fall back to typing the mount.
+func (c *Client) KVMounts(ctx context.Context) ([]Mount, error) {
+	var resp struct {
+		Data struct {
+			Secret map[string]struct {
+				Type    string            `json:"type"`
+				Options map[string]string `json:"options"`
+			} `json:"secret"`
+		} `json:"data"`
+	}
+	if err := c.api.Do(ctx, http.MethodGet, "/v1/sys/internal/ui/mounts", nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	mounts := []Mount{}
+	for path, mount := range resp.Data.Secret {
+		if mount.Type != "kv" && mount.Type != "generic" {
+			continue
+		}
+		version := mount.Options["version"]
+		if version == "" {
+			version = "1"
+		}
+		mounts = append(mounts, Mount{Path: strings.TrimSuffix(path, "/"), Type: mount.Type, Version: version})
+	}
+	return mounts, nil
+}
+
+// List returns the keys under path. Keys ending in "/" are sub-paths.
+func (c *Client) List(ctx context.Context, mount string, kvVersion int, path string) ([]string, error) {
+	var resp struct {
+		Data struct {
+			Keys []string `json:"keys"`
+		} `json:"data"`
+	}
+	endpoint := kvPathInternal(mount, kvVersion, "metadata", path) + "/"
+	err := c.api.Do(ctx, http.MethodGet, endpoint, url.Values{"list": {"true"}}, nil, &resp)
+	if secretapi.IsNotFound(err) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return resp.Data.Keys, nil
+}
+
+// Read returns the key/value pairs of one secret and, for KV version 2, its
+// current version. A missing secret returns an error matched by IsNotFound.
+func (c *Client) Read(ctx context.Context, mount string, kvVersion int, path string) (map[string]jsontext.Value, int, error) {
+	endpoint := kvPathInternal(mount, kvVersion, "data", path)
+	if kvVersion == 2 {
+		var resp struct {
+			Data *struct {
+				Data     map[string]jsontext.Value `json:"data"`
+				Metadata struct {
+					Version int `json:"version"`
+				} `json:"metadata"`
+			} `json:"data"`
+		}
+		if err := c.api.Do(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
+			return nil, 0, err
+		}
+		if resp.Data == nil || resp.Data.Data == nil {
+			// A deleted latest version answers 404 with metadata only.
+			return nil, 0, &secretapi.APIError{Service: serviceName, StatusCode: http.StatusNotFound, Message: "the secret has no data"}
+		}
+		return resp.Data.Data, resp.Data.Metadata.Version, nil
+	}
+	var resp struct {
+		Data map[string]jsontext.Value `json:"data"`
+	}
+	if err := c.api.Do(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
+		return nil, 0, err
+	}
+	return resp.Data, 0, nil
+}
+
+// Write stores data at path, replacing what is there. For KV version 2, cas
+// is the version the write expects to replace (0 creates); a negative cas
+// skips the check.
+func (c *Client) Write(ctx context.Context, mount string, kvVersion int, path string, data map[string]any, cas int) error {
+	endpoint := kvPathInternal(mount, kvVersion, "data", path)
+	if kvVersion == 2 {
+		body := map[string]any{"data": data}
+		if cas >= 0 {
+			body["options"] = map[string]int{"cas": cas}
+		}
+		return c.api.Do(ctx, http.MethodPost, endpoint, nil, body, nil)
+	}
+	return c.api.Do(ctx, http.MethodPost, endpoint, nil, data, nil)
+}
+
+// IsNotFound reports whether err means the path does not exist.
+func IsNotFound(err error) bool {
+	return secretapi.IsNotFound(err)
+}
+
+// kvPathInternal builds /v1/<mount>/<data|metadata>/<path> for KV v2 and
+// /v1/<mount>/<path> for KV v1.
+func kvPathInternal(mount string, kvVersion int, kind, path string) string {
+	endpoint := "/v1/" + secretapi.PathEscapeSegments(mount)
+	if kvVersion == 2 {
+		endpoint += "/" + kind
+	}
+	if trimmed := strings.Trim(path, "/"); trimmed != "" {
+		endpoint += "/" + secretapi.PathEscapeSegments(trimmed)
+	}
+	return endpoint
+}
