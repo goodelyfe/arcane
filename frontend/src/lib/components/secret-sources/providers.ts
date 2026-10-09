@@ -23,6 +23,11 @@ export const providerOptions: { value: SecretProvider; label: () => string; desc
 		label: m.secret_sources_provider_onepassword,
 		description: m.secret_sources_provider_onepassword_description
 	},
+	{
+		value: 'protonpass',
+		label: m.secret_sources_provider_protonpass,
+		description: m.secret_sources_provider_protonpass_description
+	},
 	{ value: 'http', label: m.secret_sources_provider_http, description: m.secret_sources_provider_http_description }
 ];
 
@@ -34,10 +39,16 @@ export function sortedProviderOptions() {
 	return [...named, ...providerOptions.filter((option) => option.value === 'http')];
 }
 
-export type GenericProvider = 'vault' | 'doppler' | 'onepassword' | 'http';
+export type GenericProvider = 'vault' | 'doppler' | 'onepassword' | 'protonpass' | 'http';
 
 export function isGenericProvider(provider: SecretProvider | undefined): provider is GenericProvider {
-	return provider === 'vault' || provider === 'doppler' || provider === 'onepassword' || provider === 'http';
+	return (
+		provider === 'vault' ||
+		provider === 'doppler' ||
+		provider === 'onepassword' ||
+		provider === 'protonpass' ||
+		provider === 'http'
+	);
 }
 
 export function providerLabel(provider: SecretProvider | undefined): string {
@@ -58,6 +69,8 @@ export function withDefaultTarget(provider: GenericProvider, target: BindingTarg
 			return { doppler: target.doppler ?? { project: '', config: '' } };
 		case 'onepassword':
 			return { onepassword: target.onepassword ?? { scope: 'vault', vaultId: '', itemId: '', name: '' } };
+		case 'protonpass':
+			return { protonpass: target.protonpass ?? { scope: 'vault', vaultId: '', itemId: '', name: '' } };
 		case 'http':
 			return { http: target.http ?? { path: '' } };
 	}
@@ -81,6 +94,10 @@ export function isGenericTargetComplete(provider: GenericProvider, target: Bindi
 			const op = target.onepassword;
 			return !!op?.vaultId && (op.scope === 'vault' || !!op.itemId);
 		}
+		case 'protonpass': {
+			const pp = target.protonpass;
+			return !!pp?.vaultId && (pp.scope === 'vault' || !!pp.itemId);
+		}
 		case 'http':
 			return !!target.http;
 	}
@@ -101,6 +118,7 @@ export function endpointKey(settings: SourceSettings): string {
 	}
 	if (settings.doppler) return `doppler|${settings.doppler.apiUrl ?? ''}`;
 	if (settings.onepassword) return `onepassword|${settings.onepassword.serverUrl}`;
+	if (settings.protonpass) return `protonpass|${settings.protonpass.kitUrl}`;
 	if (settings.http) return `http|${settings.http.baseUrl}`;
 	return '';
 }
@@ -115,6 +133,10 @@ export function describeGenericTarget(target: BindingTarget): string {
 	if (target.onepassword) {
 		const scope = target.onepassword.scope === 'item' ? m.onepassword_scope_item() : m.onepassword_scope_vault();
 		return `${scope} · ${target.onepassword.name || target.onepassword.itemId || target.onepassword.vaultId}`;
+	}
+	if (target.protonpass) {
+		const scope = target.protonpass.scope === 'item' ? m.onepassword_scope_item() : m.onepassword_scope_vault();
+		return `${scope} · ${target.protonpass.name || target.protonpass.itemId || target.protonpass.vaultId}`;
 	}
 	if (target.http) {
 		return target.http.path ? `/${target.http.path}` : m.http_target_root();
