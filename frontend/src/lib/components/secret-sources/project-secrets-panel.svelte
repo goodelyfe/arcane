@@ -11,16 +11,7 @@
 	import { Label } from '#lib/components/ui/label/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import {
-		AlertIcon,
-		AlertTriangleIcon,
-		CheckIcon,
-		LockIcon,
-		RefreshIcon,
-		ShieldCheckIcon,
-		VariableIcon,
-		ZapIcon
-	} from '#lib/icons/index.js';
+	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, VariableIcon, ZapIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { projectService } from '#lib/services/project-service.js';
@@ -43,6 +34,7 @@
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
 	import ComposeRefsSheet from './compose-refs-sheet.svelte';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
+	import ProviderIcon from './provider-icon.svelte';
 	import ProviderTargetFields from './provider-target-fields.svelte';
 	import {
 		describeGenericTarget,
@@ -376,9 +368,7 @@
 {#snippet summary(current: ProjectSecretBinding)}
 	<div class="space-y-4">
 		<div class="flex flex-wrap items-center gap-4 rounded-xl border border-border/70 bg-card/60 p-4 backdrop-blur-md">
-			<div class="flex size-12 shrink-0 items-center justify-center rounded-full bg-primary/10 ring-1 ring-primary/30 ring-inset">
-				<ShieldCheckIcon class="size-6 text-primary" />
-			</div>
+			<ProviderIcon provider={current.provider} class="size-12 rounded-xl p-2" />
 			<div class="min-w-0 flex-1 space-y-1">
 				<div class="flex flex-wrap items-center gap-2">
 					<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(current.provider) })}</h3>
@@ -424,7 +414,7 @@
 					/>
 				{/if}
 				{#if canEdit}
-					{#if canSetup && setupSources.length > 0}
+					{#if canSetup && setupSources.length > 0 && providerCanSetUp(current.provider)}
 						<ArcaneButton
 							action="base"
 							tone="outline"
@@ -563,6 +553,7 @@
 				<Select.Content>
 					{#each sources as source (source.id)}
 						<Select.Item value={source.id}>
+							<ProviderIcon provider={source.provider} class="size-5" />
 							<div class="flex flex-col">
 								<span>{source.name}</span>
 								<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>

@@ -5,6 +5,7 @@
 	import type { ColumnSpec, MobileFieldVisibility } from '#lib/components/arcane-table/index.js';
 	import RowActionsMenu from '#lib/components/arcane-table/row-actions-menu.svelte';
 	import IfPermitted from '#lib/components/if-permitted.svelte';
+	import ProviderIcon from '#lib/components/secret-sources/provider-icon.svelte';
 	import { providerLabel } from '#lib/components/secret-sources/providers.js';
 	import { Badge, type BadgeVariant } from '#lib/components/ui/badge/index.js';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
@@ -112,6 +113,7 @@
 
 {#snippet NameCell({ item }: { item: SecretSource })}
 	<div class="flex items-center gap-2">
+		<ProviderIcon provider={item.provider} />
 		<span class="font-medium">{item.name}</span>
 		<Badge variant={providerBadges[item.provider]} size="sm">{providerLabel(item.provider)}</Badge>
 	</div>

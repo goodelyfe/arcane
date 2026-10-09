@@ -5,7 +5,8 @@
 	import { ArcaneButton } from '#lib/components/arcane-button/index.js';
 	import FormInput from '#lib/components/form/form-input.svelte';
 	import SwitchWithLabel from '#lib/components/form/labeled-switch.svelte';
-	import { endpointKey, providerOptions } from '#lib/components/secret-sources/providers.js';
+	import ProviderIcon from '#lib/components/secret-sources/provider-icon.svelte';
+	import { endpointKey, sortedProviderOptions } from '#lib/components/secret-sources/providers.js';
 	import SheetFooterActions from '#lib/components/sheets/sheet-footer-actions.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Label } from '#lib/components/ui/label/index.js';
@@ -51,7 +52,7 @@
 	// The provider is fixed once a source exists; bindings depend on it.
 	let provider = $state<SecretProvider>(untrack(() => sourceToEdit?.provider ?? 'infisical'));
 
-	const providers = providerOptions;
+	const providers = sortedProviderOptions();
 	const storedVault = untrack(() => sourceToEdit?.settings.vault);
 	let vaultAuth = $state<VaultAuthMethod>(storedVault?.authMethod ?? 'token');
 	let vaultSetupToken = $state(!!storedVault?.setupToken);
@@ -338,6 +339,7 @@
 								class="flex cursor-pointer items-start gap-3 rounded-md border border-border/50 p-3 hover:bg-accent/40 has-disabled:cursor-not-allowed has-disabled:opacity-70"
 							>
 								<RadioGroup.Item value={option.value} class="mt-0.5" />
+								<ProviderIcon provider={option.value} />
 								<div class="grid gap-1 leading-none">
 									<span class="text-sm font-medium">{option.label()}</span>
 									<span class="text-xs text-muted-foreground">{option.description()}</span>
