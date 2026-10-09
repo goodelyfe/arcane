@@ -4528,5 +4528,13 @@
   "secret_setup_no_setup_token_description": "Turn on a setup token for this source to let Arcane write secrets. You can still bind the project to a path you fill yourself.",
   "secret_sources_credential_reenter": "The address or login method changed, so enter this credential again",
   "http_remove_token": "Remove the stored token",
-  "http_remove_token_description": "Send requests without a bearer token from now on."
+  "http_remove_token_description": "Send requests without a bearer token from now on.",
+  "secret_sources_provider_protonpass": "Proton Pass",
+  "secret_sources_provider_protonpass_description": "Proton Pass vaults through a pass-kit sidecar you run next to Arcane.",
+  "protonpass_kit_url": "pass-kit URL",
+  "protonpass_kit_url_description": "The pass-kit container, on a network shared with Arcane. Never publish its port.",
+  "protonpass_kit_token": "Kit bearer token",
+  "protonpass_kit_hint": "Proton Pass encrypts everything on your devices, so Arcane reads it through pass-kit, which runs Proton's pass-cli with a personal access token. The token stays in the kit; Arcane only stores the kit's optional bearer token.",
+  "protonpass_scope_vault_description": "Each item becomes one variable: the title is the key, and the login password, note, or first hidden field is the value.",
+  "protonpass_scope_item_description": "Each custom field of the item becomes one variable: the field name is the key."
 }
