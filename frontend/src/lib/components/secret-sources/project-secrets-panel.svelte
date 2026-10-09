@@ -473,7 +473,7 @@
 			{:else}
 				<Badge variant="green" size="sm"><CheckIcon class="size-3" />{m.project_secrets_in_sync()}</Badge>
 			{/if}
-			<span class="ml-auto text-xs text-muted-foreground">{m.project_secrets_keys_count({ count: result.keys.length })}</span>
+			<span class="ml-auto text-xs text-muted-foreground">{result.keys.length === 1 ? m.project_secrets_keys_count_one() : m.project_secrets_keys_count({ count: result.keys.length })}</span>
 		</div>
 
 		{#if result.keys.length > 0}
@@ -528,7 +528,9 @@
 			void save();
 		}}
 	>
-		<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(draftProvider) })}</h3>
+		<h3 class="text-base font-semibold">
+			{draftProvider ? m.project_secrets_title({ provider: providerLabel(draftProvider) }) : m.project_secrets_bind()}
+		</h3>
 
 		<div class="space-y-2">
 			<Label for="secret-source">{m.project_secrets_source()}</Label>

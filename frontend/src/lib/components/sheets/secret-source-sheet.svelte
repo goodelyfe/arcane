@@ -133,7 +133,9 @@
 	function visibleLabel(result: SecretSourceTestResult): string {
 		return provider === 'bitwarden'
 			? m.secret_sources_test_visible_items({ count: result.visibleCount })
-			: m.secret_sources_test_visible_projects({ count: result.visibleCount });
+			: result.visibleCount === 1
+				? m.secret_sources_test_visible_projects_one()
+				: m.secret_sources_test_visible_projects({ count: result.visibleCount });
 	}
 
 	async function testConnection() {

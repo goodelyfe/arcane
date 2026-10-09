@@ -188,7 +188,7 @@
 							onclick={() => void loadKeys()}
 						/>
 						{#if keys !== null}
-							<span class="text-sm text-muted-foreground">{m.project_secrets_keys_count({ count: keys.length })}</span>
+							<span class="text-sm text-muted-foreground">{keys.length === 1 ? m.project_secrets_keys_count_one() : m.project_secrets_keys_count({ count: keys.length })}</span>
 						{/if}
 					</div>
 
