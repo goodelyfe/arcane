@@ -25,14 +25,21 @@ type SecretSource struct {
 
 func (SecretSource) TableName() string { return "secret_sources" }
 
-// ProjectSecretBinding connects one project to one provider target. It stores
-// no secret values. The hashes are salted HMACs of a whole secret set: what the
-// last deploy used, what the last check saw, and the last change already
-// announced (so a change is reported and auto-redeployed only once).
+// ProjectSecretBinding connects a project to one provider target; a project
+// can have several, applied in Position order. It stores no secret values:
+// the hashes are salted HMACs of one binding's secret set (what the last
+// deploy used, what the last check saw, and the last change already announced,
+// so a change is reported and auto-redeployed only once), and DeployedKeys
+// are the names the last deploy delivered.
+//
+// The table is secret_bindings, with an owner kind, so standalone containers
+// can be bound later without another table; only projects are supported now.
 type ProjectSecretBinding struct {
 	database.BaseModel
 
+	OwnerKind        string                          `gorm:"column:owner_kind"`
 	ProjectID        string                          `gorm:"column:project_id"`
+	Position         int                             `gorm:"column:position"`
 	SourceID         string                          `gorm:"column:source_id"`
 	Source           *SecretSource                   `gorm:"foreignKey:SourceID"`
 	Target           secretsourcetypes.BindingTarget `gorm:"column:target;serializer:json"`
@@ -41,6 +48,7 @@ type ProjectSecretBinding struct {
 	AutoRedeploy     bool                            `gorm:"column:auto_redeploy"`
 	HashSalt         string                          `gorm:"column:hash_salt"`
 	DeployedHash     *string                         `gorm:"column:deployed_hash"`
+	DeployedKeys     []string                        `gorm:"column:deployed_keys;serializer:json"`
 	DeployedAt       *time.Time                      `gorm:"column:deployed_at"`
 	LastSeenHash     *string                         `gorm:"column:last_seen_hash"`
 	LastNotifiedHash *string                         `gorm:"column:last_notified_hash"`
@@ -49,7 +57,7 @@ type ProjectSecretBinding struct {
 	LastFetchError   *string                         `gorm:"column:last_fetch_error"`
 }
 
-func (ProjectSecretBinding) TableName() string { return "project_secret_bindings" }
+func (ProjectSecretBinding) TableName() string { return "secret_bindings" }
 
 // redeployNeededInternal reports whether the last check saw a different secret
 // set than the last deploy used.

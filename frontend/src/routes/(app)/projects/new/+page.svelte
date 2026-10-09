@@ -78,9 +78,13 @@
 	const canCreateProject = $derived(hasPermission('projects:create', currentEnvId));
 	// Originals are removed from their own environment, not the destination.
 	const canDeleteContainers = $derived(hasPermission('containers:delete', data.sourceEnvironmentId ?? currentEnvId));
-	// Secret bindings are local-environment only for now.
+	// Secret bindings are local-environment only for now, and binding needs secret-sources:use.
 	const canPickSecrets = $derived(
-		currentEnvId === '0' && hasPermission('secret-sources:list') && hasPermission('secret-sources:read')
+		currentEnvId === '0' &&
+			hasPermission('secret-sources:list') &&
+			hasPermission('secret-sources:read') &&
+			hasPermission('secret-sources:use') &&
+			hasPermission('projects:update', currentEnvId)
 	);
 	let secretsSheetOpen = $state(false);
 	let secretsSheetSession = $state(0);
@@ -95,7 +99,7 @@
 	// leaves the project in place and says how to finish from its Secrets tab.
 	async function bindPendingSecrets(projectId: string) {
 		if (!pendingSecrets) return;
-		const result = await tryCatch(secretSourceService.saveBinding(currentEnvId, projectId, pendingSecrets.binding));
+		const result = await tryCatch(secretSourceService.createBinding(currentEnvId, projectId, pendingSecrets.binding));
 		if (result.error) {
 			toast.error(m.new_project_secrets_bind_failed(), { description: extractApiErrorMessage(result.error) });
 		}

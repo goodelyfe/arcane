@@ -4,7 +4,7 @@ import type {
 	ComposeService,
 	ProjectSecretBinding,
 	ProjectSecretBindingDto,
-	ProjectSecretCheckResult,
+	ProjectSecretsCheck,
 	SecretBrowseItem,
 	SecretBrowseQuery,
 	SecretSource,
@@ -77,20 +77,31 @@ class SecretSourceService extends BaseAPIService {
 		return this.handleResponse(this.api.post(`${this.bindingPath(environmentId, projectId)}/setup`, request));
 	}
 
-	async getBinding(environmentId: string, projectId: string): Promise<ProjectSecretBinding | null> {
+	async listBindings(environmentId: string, projectId: string): Promise<ProjectSecretBinding[]> {
 		const response = await this.api.get(this.bindingPath(environmentId, projectId));
-		return response.data?.data ?? null;
+		return response.data?.data ?? [];
 	}
 
-	async saveBinding(environmentId: string, projectId: string, dto: ProjectSecretBindingDto): Promise<ProjectSecretBinding> {
-		return this.handleResponse(this.api.put(this.bindingPath(environmentId, projectId), dto));
+	async createBinding(environmentId: string, projectId: string, dto: ProjectSecretBindingDto): Promise<ProjectSecretBinding> {
+		return this.handleResponse(this.api.post(this.bindingPath(environmentId, projectId), dto));
 	}
 
-	async deleteBinding(environmentId: string, projectId: string): Promise<void> {
-		return this.handleResponse(this.api.delete(this.bindingPath(environmentId, projectId)));
+	async updateBinding(
+		environmentId: string,
+		projectId: string,
+		bindingId: string,
+		dto: ProjectSecretBindingDto
+	): Promise<ProjectSecretBinding> {
+		return this.handleResponse(
+			this.api.put(`${this.bindingPath(environmentId, projectId)}/${encodeURIComponent(bindingId)}`, dto)
+		);
 	}
 
-	async checkBinding(environmentId: string, projectId: string): Promise<ProjectSecretCheckResult> {
+	async deleteBinding(environmentId: string, projectId: string, bindingId: string): Promise<void> {
+		return this.handleResponse(this.api.delete(`${this.bindingPath(environmentId, projectId)}/${encodeURIComponent(bindingId)}`));
+	}
+
+	async checkBindings(environmentId: string, projectId: string): Promise<ProjectSecretsCheck> {
 		return this.handleResponse(this.api.post(`${this.bindingPath(environmentId, projectId)}/check`, {}));
 	}
 

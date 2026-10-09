@@ -1074,7 +1074,7 @@ func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID st
 	return s.updateProjectServices(ctx, projectID, servicesToUpdate, user, discoverTags)
 }
 
-func (s *ProjectService) updateProjectServices(ctx context.Context, projectID string, servicesToUpdate []string, user usertypes.Actor, discoverTags bool) error {
+func (s *ProjectService) updateProjectServices(ctx context.Context, projectID string, servicesToUpdate []string, user usertypes.Actor, discoverTags bool) (retErr error) {
 	proj, err := s.getMutableProject(ctx, projectID)
 	if err != nil {
 		return err
@@ -1100,6 +1100,8 @@ func (s *ProjectService) updateProjectServices(ctx context.Context, projectID st
 	if err != nil {
 		return err
 	}
+	ctx, closeRedaction := redactSecretOutputInternal(ctx, secretEnv)
+	defer func() { retErr = closeRedaction(retErr) }()
 
 	// 1. Load project
 	prepare := deployment.PrepareProjectBindDirectories(proj.Path)
@@ -1264,7 +1266,7 @@ func (s *ProjectService) DeployProject(ctx context.Context, projectID string, us
 	return s.deployProject(ctx, projectID, user, options)
 }
 
-func (s *ProjectService) deployProject(ctx context.Context, projectID string, user usertypes.Actor, options *projecttypes.DeployOptions) error {
+func (s *ProjectService) deployProject(ctx context.Context, projectID string, user usertypes.Actor, options *projecttypes.DeployOptions) (retErr error) {
 	projectFromDb, err := s.getMutableProject(ctx, projectID)
 	switch {
 	case errors.Is(err, common.ErrProjectArchived):
@@ -1282,6 +1284,8 @@ func (s *ProjectService) deployProject(ctx context.Context, projectID string, us
 	if err != nil {
 		return err
 	}
+	ctx, closeRedaction := redactSecretOutputInternal(ctx, secretEnv)
+	defer func() { retErr = closeRedaction(retErr) }()
 
 	if updateProjectStatusErr := s.updateProjectStatus(ctx, projectID, ProjectStatusDeploying); updateProjectStatusErr != nil {
 		return fmt.Errorf("failed to update project status to deploying: %w", updateProjectStatusErr)

@@ -21,6 +21,7 @@ import (
 	containertypes "github.com/getarcaneapp/arcane/types/v2/container"
 	"github.com/getarcaneapp/arcane/types/v2/containerregistry"
 	imagetypes "github.com/getarcaneapp/arcane/types/v2/image"
+	secretsourcetypes "github.com/getarcaneapp/arcane/types/v2/secretsource"
 	usertypes "github.com/getarcaneapp/arcane/types/v2/user"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
@@ -47,6 +48,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/kv"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/podman"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/project"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/settings"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/libarcane"
 	libpodman "github.com/getarcaneapp/arcane/backend/v2/pkg/libarcane/podman"
@@ -81,8 +83,62 @@ type ContainerService struct {
 	podmanService   *podman.Service
 	iconMetaCache   *hot.HotCache[string, projects.ArcaneComposeMetadata]
 	stats           *stats.Service
+	secretFiller    SecretFiller
 	// opLock serializes mutating operations on the same container.
 	opLock utils.KeyedMutex
+}
+
+// SecretFiller fills a new container's environment from secret sources.
+// Implemented by secretsource.SecretSourceService.
+type SecretFiller interface {
+	ResolveTargets(ctx context.Context, refs []secretsourcetypes.TargetRef, actor usertypes.Actor) (map[string]string, error)
+}
+
+// SetSecretFiller lets container creation read secret sources.
+func (s *ContainerService) SetSecretFiller(filler SecretFiller) {
+	s.secretFiller = filler
+}
+
+// SecretEnvKeysLabel lists, on a container filled from secret sources, the
+// variables that came from them, so views can mask their values.
+const SecretEnvKeysLabel = "com.arcane.secret-env-keys"
+
+// FillSecretEnv adds variables from secret source targets to env, for keys
+// env does not already set, and returns the new env and the added names. The
+// values are read once and kept only in the new container's configuration.
+func (s *ContainerService) FillSecretEnv(
+	ctx context.Context,
+	env []string,
+	refs []secretsourcetypes.TargetRef,
+	actor usertypes.Actor,
+) ([]string, []string, error) {
+	if len(refs) == 0 {
+		return env, nil, nil
+	}
+	if s.secretFiller == nil {
+		return nil, nil, errors.New("secret sources are not available")
+	}
+	values, err := s.secretFiller.ResolveTargets(ctx, refs, actor)
+	if err != nil {
+		return nil, nil, err
+	}
+	set := make(map[string]struct{}, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		set[name] = struct{}{}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if _, explicit := set[key]; !explicit {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	filled := slices.Clone(env)
+	for _, key := range keys {
+		filled = append(filled, key+"="+values[key])
+	}
+	return filled, keys, nil
 }
 
 type ContainerListResult struct {
@@ -1140,11 +1196,20 @@ func (s *ContainerService) GetContainerEditConfig(ctx context.Context, container
 	}
 
 	currentContainerID, currentContainerErr := cgroup.CurrentContainerID()
-	return containertypes.NewEditConfigFromInspect(
+	containerLabels := kit.FromPtr(containerJSON.Container.Config).Labels
+	isCompose := docker.ComposeProjectLabel(containerLabels) != ""
+	editConfig := containertypes.NewEditConfigFromInspect(
 		&containerJSON.Container,
-		docker.ComposeProjectLabel(kit.FromPtr(containerJSON.Container.Config).Labels) != "",
-		labels.ShouldDisableArcaneServerRedeploy(kit.FromPtr(containerJSON.Container.Config).Labels, containerJSON.Container.ID, currentContainerID, currentContainerErr),
-	), nil
+		isCompose,
+		labels.ShouldDisableArcaneServerRedeploy(containerLabels, containerJSON.Container.ID, currentContainerID, currentContainerErr),
+	)
+	// Compose-managed containers cannot be edited in Arcane, so a masked value
+	// is never written back. Containers filled at create stay unmasked here:
+	// an edit recreates them from this config.
+	if isCompose {
+		s.maskSecretEnvInternal(ctx, containerLabels, editConfig.Environment)
+	}
+	return editConfig, nil
 }
 
 // EditContainer applies a user-supplied config diff onto the container's
@@ -1266,6 +1331,7 @@ func (s *ContainerService) GetContainerDetails(ctx context.Context, id string) (
 		slog.WarnContext(ctx, "Failed to fetch container update info", "error", err)
 	}
 	resolvedIcon := s.resolveContainerIcon(ctx, details.Labels, map[string]projects.ArcaneComposeMetadata{})
+	secretEnvKeys := s.maskSecretEnvInternal(ctx, details.Labels, details.Config.Env)
 
 	return containertypes.Details{ //exhaustruct:enforce
 		ID:               details.ID,
@@ -1286,9 +1352,43 @@ func (s *ContainerService) GetContainerDetails(ctx context.Context, id string) (
 		RedeployDisabled: labels.ShouldDisableArcaneServerRedeploy(details.Labels, details.ID, currentContainerID, currentContainerErr),
 		AutoUpdateEnabled: !labels.IsUpdateDisabled(details.Labels) &&
 			!docker.ContainerNameExcluded([]string{details.Name}, docker.ExcludedContainerNameSet(s.settingsService.GetStringSetting(ctx, "autoUpdateExcludedContainers", ""))),
-		UpdateInfo: updates[details.ID],
-		ActivityID: details.ActivityID,
+		UpdateInfo:    updates[details.ID],
+		ActivityID:    details.ActivityID,
+		SecretEnvKeys: secretEnvKeys,
 	}, nil
+}
+
+// maskSecretEnvInternal replaces, in place, the values of environment
+// entries that came from secret sources (through the compose project's last
+// deploy, or the fill at create recorded in SecretEnvKeysLabel) and returns
+// the masked names.
+func (s *ContainerService) maskSecretEnvInternal(ctx context.Context, labels map[string]string, env []string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	var keys []string
+	if composeProject := docker.ComposeProjectLabel(labels); composeProject != "" && s.projectService != nil {
+		keys = s.projectService.SecretKeysForComposeProject(ctx, composeProject)
+	}
+	if filled := labels[SecretEnvKeysLabel]; filled != "" {
+		keys = append(keys, strings.Split(filled, ",")...)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	secret := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		secret[key] = struct{}{}
+	}
+	var masked []string
+	for i, entry := range env {
+		name, _, hasValue := strings.Cut(entry, "=")
+		if _, ok := secret[name]; ok && hasValue {
+			env[i] = name + "=" + secretsource.RedactedMarker
+			masked = append(masked, name)
+		}
+	}
+	return masked
 }
 
 // containerProcessesPsArgs lists ps argument sets in preference order: procps first, then
