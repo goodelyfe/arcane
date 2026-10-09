@@ -144,7 +144,7 @@
 						<Select.Content>
 							{#each sources as source (source.id)}
 								<Select.Item value={source.id}>
-									<ProviderIcon provider={source.provider} class="size-5" />
+									<ProviderIcon provider={source.provider} class="size-6 rounded-md p-1" />
 									<div class="flex flex-col">
 										<span>{source.name}</span>
 										<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>

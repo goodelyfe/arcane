@@ -1,12 +1,14 @@
 <script lang="ts">
 	import type { Component } from 'svelte';
-	import OnePasswordIcon from 'virtual:icons/selfhst/1password';
 	// Brand marks from the selfh.st icon set (CC BY 4.0), the same set Arcane
 	// offers as an icon catalog. They are bundled, so no request leaves Arcane.
+	import OnePasswordIcon from 'virtual:icons/selfhst/1password';
+	import OnePasswordLightIcon from 'virtual:icons/selfhst/1password-light';
 	import BitwardenIcon from 'virtual:icons/selfhst/bitwarden';
 	import DopplerIcon from 'virtual:icons/selfhst/doppler';
 	import VaultIcon from 'virtual:icons/selfhst/hashicorp-vault';
 	import InfisicalIcon from 'virtual:icons/selfhst/infisical';
+	import InfisicalLightIcon from 'virtual:icons/selfhst/infisical-light';
 
 	import { ConnectionIcon } from '#lib/icons/index.js';
 	import type { SecretProvider } from '#lib/types/secret-source.js';
@@ -14,28 +16,30 @@
 
 	let { provider, class: className }: { provider: SecretProvider | undefined; class?: string } = $props();
 
-	const brandIcons: Partial<Record<SecretProvider, Component>> = {
-		bitwarden: BitwardenIcon,
-		doppler: DopplerIcon,
-		infisical: InfisicalIcon,
-		onepassword: OnePasswordIcon,
-		vault: VaultIcon
+	// `dark` replaces marks that are too dark to see on the dark theme.
+	const brandIcons: Partial<Record<SecretProvider, { light: Component; dark?: Component }>> = {
+		bitwarden: { light: BitwardenIcon },
+		doppler: { light: DopplerIcon },
+		infisical: { light: InfisicalIcon, dark: InfisicalLightIcon },
+		onepassword: { light: OnePasswordIcon, dark: OnePasswordLightIcon },
+		vault: { light: VaultIcon }
 	};
 
-	const Brand = $derived(provider ? brandIcons[provider] : undefined);
+	const brand = $derived(provider ? brandIcons[provider] : undefined);
 </script>
 
-<!-- Brand colors are made for light backgrounds, so brand marks sit on a white tile in both themes. -->
 <span
 	class={cn(
-		'inline-flex size-6 shrink-0 items-center justify-center rounded-md p-0.5 ring-1 ring-border/60',
-		Brand ? 'bg-white' : 'bg-muted text-muted-foreground',
+		'inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-card p-1.5 text-muted-foreground ring-1 ring-border',
 		className
 	)}
 	aria-hidden="true"
 >
-	{#if Brand}
-		<Brand class="size-full" />
+	{#if brand?.dark}
+		<brand.light class="size-full dark:hidden" />
+		<brand.dark class="hidden size-full dark:block" />
+	{:else if brand}
+		<brand.light class="size-full" />
 	{:else}
 		<ConnectionIcon class="size-full" />
 	{/if}
