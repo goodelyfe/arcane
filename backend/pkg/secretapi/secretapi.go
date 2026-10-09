@@ -37,6 +37,10 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("%s returned HTTP %d: %s", e.Service, e.StatusCode, e.Message)
 }
 
+// ErrUnexpectedShape means a 2xx answer did not decode into the expected
+// shape. Decoder messages can quote values, so the cause is not kept.
+var ErrUnexpectedShape = errors.New("unexpected response shape")
+
 // IsNotFound reports whether err is an HTTP 404 from a secret manager.
 func IsNotFound(err error) bool {
 	apiErr, ok := errors.AsType[*APIError](err)
@@ -105,8 +109,8 @@ func (r *Requester) Do(ctx context.Context, method, path string, query url.Value
 	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
 		return nil
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("decode %s response: %w", r.Service, err)
+	if json.Unmarshal(raw, out) != nil {
+		return fmt.Errorf("decode %s response: %w", r.Service, ErrUnexpectedShape)
 	}
 	return nil
 }
