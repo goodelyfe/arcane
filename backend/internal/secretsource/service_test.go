@@ -2,6 +2,7 @@ package secretsource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -133,7 +134,7 @@ func createInfisicalSourceInternal(t *testing.T, service *SecretSourceService, s
 
 func bindInfisicalInternal(t *testing.T, service *SecretSourceService, sourceID string, required, autoRedeploy bool) {
 	t.Helper()
-	_, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+	_, err := upsertBindingForTestInternal(t.Context(), service, "project-1", secretsourcetypes.UpsertBindingRequest{
 		SourceID: sourceID,
 		Target: secretsourcetypes.BindingTarget{Infisical: &secretsourcetypes.InfisicalTarget{
 			ProjectID: "p1", Environment: "prod", SecretPath: "billing", IncludeImports: true, ExpandReferences: true,
@@ -143,6 +144,63 @@ func bindInfisicalInternal(t *testing.T, service *SecretSourceService, sourceID 
 		AutoRedeploy: autoRedeploy,
 	})
 	require.NoError(t, err)
+}
+
+// The helpers below keep the single-binding tests readable: each project in
+// them has at most one binding.
+
+func upsertBindingForTestInternal(
+	ctx context.Context,
+	service *SecretSourceService,
+	projectID string,
+	req secretsourcetypes.UpsertBindingRequest,
+) (*secretsourcetypes.Binding, error) {
+	existing, err := service.ListBindings(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) > 0 {
+		return service.UpdateBinding(ctx, projectID, existing[0].ID, req)
+	}
+	return service.CreateBinding(ctx, projectID, req)
+}
+
+func firstBindingForTestInternal(ctx context.Context, service *SecretSourceService, projectID string) (*secretsourcetypes.Binding, error) {
+	bindings, err := service.ListBindings(ctx, projectID)
+	if err != nil || len(bindings) == 0 {
+		return nil, err
+	}
+	return &bindings[0], nil
+}
+
+func checkFirstBindingForTestInternal(
+	ctx context.Context,
+	service *SecretSourceService,
+	project ProjectRef,
+	actor usertypes.Actor,
+) (secretsourcetypes.CheckResult, error) {
+	result, err := service.CheckBindings(ctx, project, actor)
+	if err != nil {
+		return secretsourcetypes.CheckResult{}, err
+	}
+	first := result.Bindings[0]
+	if first.Error != "" {
+		return first, errors.New(first.Error)
+	}
+	return first, nil
+}
+
+func deleteBindingsForTestInternal(ctx context.Context, service *SecretSourceService, projectID string) error {
+	bindings, err := service.ListBindings(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	for _, binding := range bindings {
+		if deleteErr := service.DeleteBinding(ctx, projectID, binding.ID); deleteErr != nil {
+			return deleteErr
+		}
+	}
+	return nil
 }
 
 func TestCreateSourceValidatesPerProvider(t *testing.T) {
@@ -257,7 +315,7 @@ func TestUpsertBindingNormalizesNewProviderTargets(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	binding, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+	binding, err := upsertBindingForTestInternal(t.Context(), service, "project-1", secretsourcetypes.UpsertBindingRequest{
 		SourceID: bao.ID, Enabled: true,
 		Target: secretsourcetypes.BindingTarget{
 			Vault:   &secretsourcetypes.VaultTarget{Path: "/apps/web/"},
@@ -268,7 +326,7 @@ func TestUpsertBindingNormalizesNewProviderTargets(t *testing.T) {
 	assert.Equal(t, &secretsourcetypes.VaultTarget{Mount: "secret", Path: "apps/web", KVVersion: 2}, binding.Target.Vault)
 	assert.Nil(t, binding.Target.Doppler, "targets of another provider must be dropped")
 
-	_, err = service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+	_, err = upsertBindingForTestInternal(t.Context(), service, "project-1", secretsourcetypes.UpsertBindingRequest{
 		SourceID: bao.ID, Enabled: true,
 		Target: secretsourcetypes.BindingTarget{Vault: &secretsourcetypes.VaultTarget{Path: "apps/../sys"}},
 	})
@@ -319,7 +377,7 @@ func TestDeleteSourceInUseIsRejected(t *testing.T) {
 	bindInfisicalInternal(t, service, source.ID, true, false)
 
 	require.ErrorIs(t, service.DeleteSource(t.Context(), source.ID), common.ErrSecretSourceInUse)
-	require.NoError(t, service.DeleteBinding(t.Context(), "project-1"))
+	require.NoError(t, deleteBindingsForTestInternal(t.Context(), service, "project-1"))
 	require.NoError(t, service.DeleteSource(t.Context(), source.ID))
 }
 
@@ -327,7 +385,7 @@ func TestUpsertBindingValidatesTargetForProvider(t *testing.T) {
 	service, _ := setupSecretSourceServiceTestInternal(t)
 	source := createInfisicalSourceInternal(t, service, "")
 
-	_, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+	_, err := upsertBindingForTestInternal(t.Context(), service, "project-1", secretsourcetypes.UpsertBindingRequest{
 		SourceID: source.ID,
 		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "folder", ID: "f1"}},
 	})
@@ -364,7 +422,7 @@ func TestResolveDeployEnvRequiredVersusOptional(t *testing.T) {
 	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
 	assert.Contains(t, err.Error(), "Permission denied")
 
-	binding, err := service.GetBinding(t.Context(), "project-1")
+	binding, err := firstBindingForTestInternal(t.Context(), service, "project-1")
 	require.NoError(t, err)
 	require.NotNil(t, binding.LastFetchError)
 
@@ -386,7 +444,7 @@ func TestResolveDeployEnvEmptyResultFailsOnlyWhenRequired(t *testing.T) {
 	require.ErrorIs(t, err, common.ErrSecretFetchFailed)
 	assert.Contains(t, err.Error(), "no usable secrets")
 
-	result, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	result, err := checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.Empty(t, result.Keys)
 	assert.Equal(t, []string{"bad-key"}, result.InvalidKeys)
@@ -405,7 +463,7 @@ func TestResolveDeployEnvSkipsDisabledAndUnboundProjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, env.Values)
 
-	_, err = service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+	_, err = upsertBindingForTestInternal(t.Context(), service, "project-1", secretsourcetypes.UpsertBindingRequest{
 		SourceID: source.ID,
 		Target:   secretsourcetypes.BindingTarget{Infisical: &secretsourcetypes.InfisicalTarget{ProjectID: "p1", Environment: "prod"}},
 		Required: true,
@@ -428,7 +486,7 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DB_PASS=local\nOTHER=1\n"), 0o600))
 	project := ProjectRef{ID: "project-1", Name: "billing-api", Path: projectDir}
 
-	result, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	result, err := checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"API_KEY", "DB_PASS"}, result.Keys)
 	assert.Equal(t, []string{"DB_PASS"}, result.OverriddenKeys)
@@ -436,18 +494,18 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 
 	deployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	service.RecordDeployed(t.Context(), project.ID, deployed.Hash)
+	service.RecordDeployed(t.Context(), project.ID, deployed)
 
-	result, err = service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	result, err = checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.False(t, result.RedeployNeeded)
 
 	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"two"},{"secretKey":"API_KEY","secretValue":"k"}]}`)
-	result, err = service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	result, err = checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.True(t, result.RedeployNeeded)
 
-	binding, err := service.GetBinding(t.Context(), project.ID)
+	binding, err := firstBindingForTestInternal(t.Context(), service, project.ID)
 	require.NoError(t, err)
 	assert.True(t, binding.RedeployNeeded, "the binding remembers what the last check saw")
 }
@@ -466,7 +524,7 @@ func TestCheckDriftReportsEachChangeOnce(t *testing.T) {
 
 	deployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	service.RecordDeployed(t.Context(), project.ID, deployed.Hash)
+	service.RecordDeployed(t.Context(), project.ID, deployed)
 	assert.Empty(t, service.CheckDrift(t.Context(), resolve), "unchanged secrets are not drift")
 
 	fake.setSecrets(`{"secrets":[{"secretKey":"DB_PASS","secretValue":"two"}]}`)
@@ -482,8 +540,8 @@ func TestCheckDriftReportsEachChangeOnce(t *testing.T) {
 
 	redeployed, err := service.ResolveDeployEnv(t.Context(), project, usertypes.Actor{})
 	require.NoError(t, err)
-	service.RecordDeployed(t.Context(), project.ID, redeployed.Hash)
-	binding, err := service.GetBinding(t.Context(), project.ID)
+	service.RecordDeployed(t.Context(), project.ID, redeployed)
+	binding, err := firstBindingForTestInternal(t.Context(), service, project.ID)
 	require.NoError(t, err)
 	assert.False(t, binding.RedeployNeeded)
 }
@@ -503,18 +561,18 @@ func TestBitwardenSourceFolderAndItemBindings(t *testing.T) {
 	assert.Contains(t, result.Message, "deploy@example")
 
 	project := ProjectRef{ID: "project-1", Name: "billing-api"}
-	_, err = service.UpsertBinding(t.Context(), project.ID, secretsourcetypes.UpsertBindingRequest{
+	_, err = upsertBindingForTestInternal(t.Context(), service, project.ID, secretsourcetypes.UpsertBindingRequest{
 		SourceID: source.ID,
 		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "folder", ID: "f1", Name: "billing"}},
 		Required: true, Enabled: true,
 	})
 	require.NoError(t, err)
-	check, err := service.CheckBinding(t.Context(), project, usertypes.Actor{})
+	check, err := checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"DB_PASSWORD", "TLS_NOTE"}, check.Keys)
 	assert.Equal(t, []string{"EMPTY_LOGIN"}, check.InvalidKeys)
 
-	_, err = service.UpsertBinding(t.Context(), project.ID, secretsourcetypes.UpsertBindingRequest{
+	_, err = upsertBindingForTestInternal(t.Context(), service, project.ID, secretsourcetypes.UpsertBindingRequest{
 		SourceID: source.ID,
 		Target:   secretsourcetypes.BindingTarget{Bitwarden: &secretsourcetypes.BitwardenTarget{Scope: "item", ID: "i9"}},
 		Required: true, Enabled: true,

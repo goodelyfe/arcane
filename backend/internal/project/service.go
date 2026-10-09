@@ -127,7 +127,8 @@ type ProjectService struct {
 // operations. Implemented by secretsource.SecretSourceService.
 type SecretEnvResolver interface {
 	ResolveDeployEnv(ctx context.Context, project secretsource.ProjectRef, actor usertypes.Actor) (secretsource.DeployEnv, error)
-	RecordDeployed(ctx context.Context, projectID, hash string)
+	RecordDeployed(ctx context.Context, projectID string, env secretsource.DeployEnv)
+	DeployedKeys(ctx context.Context, projectID string) ([]string, error)
 }
 
 // SetSecretEnvResolver enables deploy-time secret injection.
@@ -153,6 +154,26 @@ func (s *ProjectService) SecretProjectRef(ctx context.Context, projectID string)
 	return secretsource.ProjectRef{ID: proj.ID, Name: proj.Name, Path: proj.Path, ProjectsDirectory: projectsDir}, nil
 }
 
+// SecretKeysForComposeProject returns the names of the secrets the last
+// deploy of a compose project delivered, so container views can mask their
+// values. It returns nil when the project has no secret bindings or is not
+// an Arcane project.
+func (s *ProjectService) SecretKeysForComposeProject(ctx context.Context, composeName string) []string {
+	if s.secretEnv == nil || composeName == "" {
+		return nil
+	}
+	proj, err := s.GetProjectByComposeName(ctx, composeName)
+	if err != nil || proj == nil {
+		return nil
+	}
+	keys, err := s.secretEnv.DeployedKeys(ctx, proj.ID)
+	if err != nil {
+		slog.WarnContext(ctx, "failed to load deployed secret keys", "projectId", proj.ID, "error", err)
+		return nil
+	}
+	return keys
+}
+
 func (s *ProjectService) resolveSecretEnvInternal(ctx context.Context, proj *Project, actor usertypes.Actor) (secretsource.DeployEnv, error) {
 	if s.secretEnv == nil || proj == nil {
 		return secretsource.DeployEnv{}, nil
@@ -160,11 +181,32 @@ func (s *ProjectService) resolveSecretEnvInternal(ctx context.Context, proj *Pro
 	return s.secretEnv.ResolveDeployEnv(ctx, secretsource.ProjectRef{ID: proj.ID, Name: proj.Name}, actor)
 }
 
+// redactSecretOutputInternal masks the deploy's secret values in the progress
+// stream and in the returned error. The returned function flushes the stream
+// and masks the error; call it once the deploy is done.
+func redactSecretOutputInternal(ctx context.Context, secretEnv secretsource.DeployEnv) (context.Context, func(error) error) {
+	redactor := secretEnv.Redactor()
+	if redactor == nil {
+		return ctx, func(err error) error { return err }
+	}
+	var stream io.WriteCloser
+	if progress, ok := ctx.Value(dockertypes.ProgressWriterKey{}).(io.Writer); ok && progress != nil {
+		stream = redactor.Writer(progress)
+		ctx = context.WithValue(ctx, dockertypes.ProgressWriterKey{}, io.Writer(stream))
+	}
+	return ctx, func(err error) error {
+		if stream != nil {
+			_ = stream.Close()
+		}
+		return redactor.Error(err)
+	}
+}
+
 func (s *ProjectService) recordSecretDeployInternal(ctx context.Context, projectID string, secretEnv secretsource.DeployEnv) {
 	if s.secretEnv == nil || secretEnv.Hash == "" {
 		return
 	}
-	s.secretEnv.RecordDeployed(ctx, projectID, secretEnv.Hash)
+	s.secretEnv.RecordDeployed(ctx, projectID, secretEnv)
 }
 
 // EnsureGitOpsProjectLinked persists the bidirectional GitOps/project binding
@@ -1030,7 +1072,7 @@ func ParseExtraMountsText(raw *string) ([]lifecycletype.ExtraMount, error) {
 	return mounts, nil
 }
 
-func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID string, servicesToUpdate []string, user usertypes.Actor, discoverTags bool) error {
+func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID string, servicesToUpdate []string, user usertypes.Actor, discoverTags bool) (retErr error) {
 	proj, err := s.getMutableProject(ctx, projectID)
 	if err != nil {
 		return err
@@ -1056,6 +1098,8 @@ func (s *ProjectService) UpdateProjectServices(ctx context.Context, projectID st
 	if err != nil {
 		return err
 	}
+	ctx, closeRedaction := redactSecretOutputInternal(ctx, secretEnv)
+	defer func() { retErr = closeRedaction(retErr) }()
 
 	// 1. Load project
 	prepare := deployment.PrepareProjectBindDirectories(proj.Path)
@@ -1212,7 +1256,7 @@ func (s *ProjectService) UnarchiveProject(ctx context.Context, projectID string,
 	return nil
 }
 
-func (s *ProjectService) DeployProject(ctx context.Context, projectID string, user usertypes.Actor, options *projecttypes.DeployOptions) error {
+func (s *ProjectService) DeployProject(ctx context.Context, projectID string, user usertypes.Actor, options *projecttypes.DeployOptions) (retErr error) {
 	projectFromDb, err := s.getMutableProject(ctx, projectID)
 	switch {
 	case errors.Is(err, common.ErrProjectArchived):
@@ -1230,6 +1274,8 @@ func (s *ProjectService) DeployProject(ctx context.Context, projectID string, us
 	if err != nil {
 		return err
 	}
+	ctx, closeRedaction := redactSecretOutputInternal(ctx, secretEnv)
+	defer func() { retErr = closeRedaction(retErr) }()
 
 	if updateProjectStatusErr := s.updateProjectStatus(ctx, projectID, ProjectStatusDeploying); updateProjectStatusErr != nil {
 		return fmt.Errorf("failed to update project status to deploying: %w", updateProjectStatusErr)

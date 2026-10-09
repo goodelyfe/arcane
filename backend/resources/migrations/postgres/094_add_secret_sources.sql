@@ -14,11 +14,17 @@ CREATE TABLE IF NOT EXISTS secret_sources (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_secret_sources_name ON secret_sources(name);
 
-CREATE TABLE IF NOT EXISTS project_secret_bindings (
+-- A binding connects a project to one target of a source; a project can have
+-- several, applied in position order. owner_kind leaves room for standalone
+-- containers (container_name) later; only projects are bound today.
+CREATE TABLE IF NOT EXISTS secret_bindings (
     id TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    owner_kind TEXT NOT NULL DEFAULT 'project',
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    container_name TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
     source_id TEXT NOT NULL REFERENCES secret_sources(id) ON DELETE RESTRICT,
     target TEXT NOT NULL DEFAULT '{}',
     required BOOLEAN NOT NULL DEFAULT TRUE,
@@ -26,17 +32,22 @@ CREATE TABLE IF NOT EXISTS project_secret_bindings (
     auto_redeploy BOOLEAN NOT NULL DEFAULT FALSE,
     hash_salt TEXT NOT NULL,
     deployed_hash TEXT,
+    deployed_keys TEXT,
     deployed_at TIMESTAMPTZ,
     last_seen_hash TEXT,
     last_notified_hash TEXT,
     last_checked_at TIMESTAMPTZ,
     last_fetched_at TIMESTAMPTZ,
-    last_fetch_error TEXT
+    last_fetch_error TEXT,
+    CHECK (
+        (owner_kind = 'project' AND project_id IS NOT NULL)
+        OR (owner_kind = 'container' AND container_name IS NOT NULL)
+    )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_project_secret_bindings_project ON project_secret_bindings(project_id);
-CREATE INDEX IF NOT EXISTS idx_project_secret_bindings_source ON project_secret_bindings(source_id);
+CREATE INDEX IF NOT EXISTS idx_secret_bindings_project ON secret_bindings(project_id, position);
+CREATE INDEX IF NOT EXISTS idx_secret_bindings_source ON secret_bindings(source_id);
 
 -- +goose Down
-DROP TABLE IF EXISTS project_secret_bindings;
+DROP TABLE IF EXISTS secret_bindings;
 DROP TABLE IF EXISTS secret_sources;

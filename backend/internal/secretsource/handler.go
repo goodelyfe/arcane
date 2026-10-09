@@ -58,10 +58,23 @@ type ProjectBindingInput struct {
 	ProjectID     string `path:"projectId" doc:"Project ID"`
 }
 
-type UpsertProjectBindingInput struct {
+type CreateProjectBindingInput struct {
 	EnvironmentID string `path:"id" doc:"Environment ID"`
 	ProjectID     string `path:"projectId" doc:"Project ID"`
 	Body          secretsourcetypes.UpsertBindingRequest
+}
+
+type UpdateProjectBindingInput struct {
+	EnvironmentID string `path:"id" doc:"Environment ID"`
+	ProjectID     string `path:"projectId" doc:"Project ID"`
+	BindingID     string `path:"bindingId" doc:"Binding ID"`
+	Body          secretsourcetypes.UpsertBindingRequest
+}
+
+type ProjectBindingIDInput struct {
+	EnvironmentID string `path:"id" doc:"Environment ID"`
+	ProjectID     string `path:"projectId" doc:"Project ID"`
+	BindingID     string `path:"bindingId" doc:"Binding ID"`
 }
 
 type SetupPlanInput struct {
@@ -152,44 +165,55 @@ func (h *SecretSourceHandler) Browse(ctx context.Context, input *BrowseSourceInp
 	return okInternal(items), nil
 }
 
-func (h *SecretSourceHandler) GetProjectBinding(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[*secretsourcetypes.Binding], error) {
+func (h *SecretSourceHandler) ListProjectBindings(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[[]secretsourcetypes.Binding], error) {
 	if _, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID); err != nil {
 		return nil, err
 	}
-	binding, err := h.service.GetBinding(ctx, input.ProjectID)
+	bindings, err := h.service.ListBindings(ctx, input.ProjectID)
+	if err != nil {
+		return nil, httpErrorInternal(err)
+	}
+	return okInternal(bindings), nil
+}
+
+func (h *SecretSourceHandler) CreateProjectBinding(ctx context.Context, input *CreateProjectBindingInput) (*handlerutil.Out[*secretsourcetypes.Binding], error) {
+	if _, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID); err != nil {
+		return nil, err
+	}
+	binding, err := h.service.CreateBinding(ctx, input.ProjectID, input.Body)
 	if err != nil {
 		return nil, httpErrorInternal(err)
 	}
 	return okInternal(binding), nil
 }
 
-func (h *SecretSourceHandler) UpsertProjectBinding(ctx context.Context, input *UpsertProjectBindingInput) (*handlerutil.Out[*secretsourcetypes.Binding], error) {
+func (h *SecretSourceHandler) UpdateProjectBinding(ctx context.Context, input *UpdateProjectBindingInput) (*handlerutil.Out[*secretsourcetypes.Binding], error) {
 	if _, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID); err != nil {
 		return nil, err
 	}
-	binding, err := h.service.UpsertBinding(ctx, input.ProjectID, input.Body)
+	binding, err := h.service.UpdateBinding(ctx, input.ProjectID, input.BindingID, input.Body)
 	if err != nil {
 		return nil, httpErrorInternal(err)
 	}
 	return okInternal(binding), nil
 }
 
-func (h *SecretSourceHandler) DeleteProjectBinding(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[base.MessageResponse], error) {
+func (h *SecretSourceHandler) DeleteProjectBinding(ctx context.Context, input *ProjectBindingIDInput) (*handlerutil.Out[base.MessageResponse], error) {
 	if _, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID); err != nil {
 		return nil, err
 	}
-	if err := h.service.DeleteBinding(ctx, input.ProjectID); err != nil {
+	if err := h.service.DeleteBinding(ctx, input.ProjectID, input.BindingID); err != nil {
 		return nil, httpErrorInternal(err)
 	}
 	return okInternal(base.MessageResponse{Message: "Secret binding removed"}), nil
 }
 
-func (h *SecretSourceHandler) CheckProjectBinding(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[secretsourcetypes.CheckResult], error) {
+func (h *SecretSourceHandler) CheckProjectBindings(ctx context.Context, input *ProjectBindingInput) (*handlerutil.Out[secretsourcetypes.ProjectCheckResult], error) {
 	project, err := h.localProjectInternal(ctx, input.EnvironmentID, input.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	result, err := h.service.CheckBinding(ctx, project, handlerutil.CurrentActor(ctx))
+	result, err := h.service.CheckBindings(ctx, project, handlerutil.CurrentActor(ctx))
 	if err != nil {
 		return nil, httpErrorInternal(err)
 	}

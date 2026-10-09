@@ -1,3 +1,5 @@
+import type { SecretTargetRef } from '#lib/types/secret-source.js';
+
 import type { VulnerabilityScanSummary } from './environment';
 
 // --- Container DTOs ---
@@ -76,6 +78,8 @@ export interface ContainerCreateRequest {
 	cmd?: string[];
 	entrypoint?: string[];
 	env?: string[];
+	// Secret source targets that fill variables env does not set, once, at create.
+	secretSources?: SecretTargetRef[];
 	exposedPorts?: Record<string, {}>;
 	healthcheck?: ContainerHealthcheckCreate;
 	hostConfig?: HostConfigCreate;
@@ -295,6 +299,8 @@ export interface ComposeInfo {
 }
 
 export interface ContainerDetailsDto {
+	// Variables from secret sources; their values in config.env are masked.
+	secretEnvKeys?: string[];
 	id: string;
 	name: string;
 	image: string;

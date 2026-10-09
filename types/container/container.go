@@ -11,6 +11,7 @@ import (
 
 	"github.com/getarcaneapp/arcane/types/v2/containerregistry"
 	imagetypes "github.com/getarcaneapp/arcane/types/v2/image"
+	"github.com/getarcaneapp/arcane/types/v2/secretsource"
 )
 
 // RestartPolicyCreate represents restart policy options for container creation.
@@ -246,6 +247,14 @@ type Create struct {
 	//
 	// Required: false
 	Env []string `json:"env,omitempty"`
+
+	// SecretSources fill environment variables from secret source targets
+	// once, when the container is created. Variables set in Environment win;
+	// earlier sources win over later ones. Needs secret-sources:use and the
+	// local environment.
+	//
+	// Required: false
+	SecretSources []secretsource.TargetRef `json:"secretSources,omitempty"`
 
 	// Labels to set on the container.
 	//
@@ -1012,6 +1021,12 @@ type Details struct {
 	//
 	// Required: true
 	Config Config `json:"config"`
+
+	// SecretEnvKeys are environment variables that came from secret sources;
+	// their values in Config.Env are masked.
+	//
+	// Required: false
+	SecretEnvKeys []string `json:"secretEnvKeys,omitempty"`
 
 	// HostConfig contains host-level configuration.
 	//

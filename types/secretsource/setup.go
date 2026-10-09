@@ -144,8 +144,8 @@ type SetupPlan struct {
 	DeployIdentityError string         `json:"deployIdentityError,omitempty"`
 	// HasGitSource is true for projects synced from Git.
 	HasGitSource bool `json:"hasGitSource"`
-	// AlreadyBound is true when the project already has a binding, which
-	// setup replaces.
+	// AlreadyBound is true when the project already has bindings. Setup
+	// updates the binding to the same target, or adds one after them.
 	AlreadyBound bool `json:"alreadyBound"`
 }
 

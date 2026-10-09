@@ -287,9 +287,26 @@ type BindingTarget struct {
 	HTTP        *HTTPTarget        `json:"http,omitempty"`
 }
 
-// Binding connects one Arcane project to one target in a secret source.
+// TargetRef names one target of a source without binding it, such as the
+// targets that fill a new container's environment once.
+type TargetRef struct {
+	SourceID string        `json:"sourceId"`
+	Target   BindingTarget `json:"target"`
+}
+
+// Binding owners. Bindings belong to projects; the owner kind leaves room for
+// standalone containers later.
+const (
+	BindingOwnerProject = "project"
+)
+
+// Binding connects one Arcane project to one target in a secret source. A
+// project can have several; when two deliver the same key, the binding with
+// the lower position wins.
 type Binding struct {
+	ID             string        `json:"id"`
 	ProjectID      string        `json:"projectId"`
+	Position       int           `json:"position"`
 	SourceID       string        `json:"sourceId"`
 	SourceName     string        `json:"sourceName"`
 	Provider       string        `json:"provider"`
@@ -304,17 +321,37 @@ type Binding struct {
 	LastFetchError *string       `json:"lastFetchError,omitempty"`
 }
 
+// UpsertBindingRequest creates or updates a binding. Position is optional:
+// a new binding goes last, and an update keeps its place unless one is given.
 type UpsertBindingRequest struct {
 	SourceID     string        `json:"sourceId"`
 	Target       BindingTarget `json:"target"`
 	Required     bool          `json:"required"`
 	Enabled      bool          `json:"enabled"`
 	AutoRedeploy bool          `json:"autoRedeploy"`
+	Position     *int          `json:"position,omitempty" minimum:"0"`
+}
+
+// ProjectCheckResult reports every binding of a project, in order.
+type ProjectCheckResult struct {
+	Bindings []CheckResult `json:"bindings"`
+	// RedeployNeeded is true when any binding changed since the last deploy.
+	RedeployNeeded bool `json:"redeployNeeded"`
 }
 
 // CheckResult reports what a fetch would deliver, without any secret values.
 type CheckResult struct {
-	Keys []string `json:"keys"`
+	BindingID string `json:"bindingId"`
+	// Error is set when this binding's fetch failed; the other fields are
+	// then empty.
+	Error string   `json:"error,omitempty"`
+	Keys  []string `json:"keys"`
+	// ShadowedKeys are delivered by an earlier binding too, so that binding's
+	// value is used.
+	ShadowedKeys []string `json:"shadowedKeys"`
+	// UnusedKeys are not referenced by any service in the compose file, so
+	// no container receives them.
+	UnusedKeys []string `json:"unusedKeys"`
 	// OverriddenKeys are keys also defined in the project's .env or
 	// .env.global; the provider's value wins at deploy.
 	OverriddenKeys []string `json:"overriddenKeys"`

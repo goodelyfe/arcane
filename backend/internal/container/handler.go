@@ -201,6 +201,36 @@ func (h *ContainerHandler) GetContainerStatusCounts(ctx context.Context, input *
 	}, nil
 }
 
+// fillSecretEnvInternal adds variables from the requested secret source
+// targets. Secret sources are local-environment only, and reading one for a
+// container needs secret-sources:use, as binding a project does.
+func (h *ContainerHandler) fillSecretEnvInternal(ctx context.Context, input *CreateContainerInput, config *dockercontainer.Config, user usertypes.Actor) error {
+	if input.EnvironmentID != "0" {
+		return huma.Error400BadRequest("Secret sources are currently supported on the local environment only")
+	}
+	if ps, _ := middleware.PermissionsFromContext(ctx); !ps.Allows(authz.PermSecretSourcesUse, "") {
+		return huma.Error403Forbidden("permission denied: " + authz.PermSecretSourcesUse)
+	}
+	env, keys, err := h.containerService.FillSecretEnv(ctx, config.Env, input.Body.SecretSources, user)
+	switch {
+	case err == nil:
+		config.Env = env
+		if len(keys) > 0 {
+			if config.Labels == nil {
+				config.Labels = map[string]string{}
+			}
+			config.Labels[SecretEnvKeysLabel] = strings.Join(keys, ",")
+		}
+		return nil
+	case errors.Is(err, common.ErrValidation):
+		return huma.Error400BadRequest(err.Error())
+	case errors.Is(err, common.ErrNotFound):
+		return huma.Error404NotFound(err.Error())
+	default:
+		return huma.Error502BadGateway("Could not read the secret sources: " + err.Error())
+	}
+}
+
 func parsePortSpec(spec string) (network.Port, error) {
 	if strings.Contains(spec, "/") {
 		return network.ParsePort(spec)
@@ -424,6 +454,12 @@ func (h *ContainerHandler) CreateContainer(ctx context.Context, input *CreateCon
 	networkingConfig, err := buildNetworkingConfig(input.Body)
 	if err != nil {
 		return nil, huma.Error400BadRequest("Invalid network configuration: " + err.Error())
+	}
+
+	if len(input.Body.SecretSources) > 0 {
+		if fillErr := h.fillSecretEnvInternal(ctx, input, config, *user); fillErr != nil {
+			return nil, fillErr
+		}
 	}
 
 	containerJSON, err := h.containerService.CreateContainer(ctx, config, hostConfig, networkingConfig, input.Body.Name, *user, input.Body.Credentials)

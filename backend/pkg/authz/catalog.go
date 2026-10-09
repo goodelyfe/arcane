@@ -93,6 +93,7 @@ var permissionCatalog = []PermissionCatalogResource{
 		{"update", PermSecretSourcesUpdate, "Update", ""},
 		{"delete", PermSecretSourcesDelete, "Delete", ""},
 		{"test", PermSecretSourcesTest, "Test", ""},
+		{"use", PermSecretSourcesUse, "Use", "Bind projects to a source and list a target's keys; a binding delivers anything the source can read"},
 	}},
 	{"git-repositories", "Git Repositories", PermissionScopeGlobal, []PermissionCatalogAction{
 		{"list", PermGitReposList, "List", ""},

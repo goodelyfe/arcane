@@ -97,13 +97,16 @@ const (
 	PermS3DestinationsSync   = "s3-destinations:sync"
 
 	// PermSecretSourcesList and siblings gate connections to external secret
-	// managers. Binding a project to a source is gated by project permissions.
+	// managers. PermSecretSourcesUse is needed, with projects:update, to bind
+	// a project to a source or to list a target's keys: a binding can deliver
+	// anything the source's identity can read.
 	PermSecretSourcesList   = "secret-sources:list"
 	PermSecretSourcesRead   = "secret-sources:read"
 	PermSecretSourcesCreate = "secret-sources:create"
 	PermSecretSourcesUpdate = "secret-sources:update"
 	PermSecretSourcesDelete = "secret-sources:delete"
 	PermSecretSourcesTest   = "secret-sources:test"
+	PermSecretSourcesUse    = "secret-sources:use"
 
 	// PermSystemBackupsRead and siblings gate Arcane's own system backups.
 	// Every route additionally requires a global admin; the dedicated grants
@@ -337,7 +340,7 @@ func BuiltInEditorPermissions() []string {
 		PermTemplatesList, PermTemplatesRead, PermTemplatesCreate, PermTemplatesUpdate, PermTemplatesDelete,
 		PermVariablesRead, PermVariablesCreate, PermVariablesUpdate, PermVariablesDelete, PermVariablesSync,
 		PermGitReposList, PermGitReposRead,
-		PermSecretSourcesList, PermSecretSourcesRead,
+		PermSecretSourcesList, PermSecretSourcesRead, PermSecretSourcesUse,
 		// Editor can run volume backups, so it needs to pick a destination.
 		PermS3DestinationsList, PermS3DestinationsRead,
 		PermEventsRead,

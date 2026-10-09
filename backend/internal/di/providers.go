@@ -19,6 +19,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/backup"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/build"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/config"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/container"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/database"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/docker"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/environment"
@@ -272,6 +273,21 @@ func provideProjectServiceInternal(
 	service.SetSecretEnvResolver(secretSources)
 	if secretSources != nil {
 		secretSources.SetProjectFileAccess(service)
+	}
+	return service
+}
+
+func provideContainerServiceInternal(
+	localEvent *event.EventService,
+	localDocker *docker.DockerClientService,
+	localImage *image.ImageService,
+	localSettings *settings.SettingsService,
+	projectService *project.ProjectService,
+	secretSources *secretsource.SecretSourceService,
+) *container.ContainerService {
+	service := container.NewContainerService(localEvent, localDocker, localImage, localSettings, projectService)
+	if secretSources != nil {
+		service.SetSecretFiller(secretSources)
 	}
 	return service
 }

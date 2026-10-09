@@ -66,22 +66,6 @@ type ProjectRef struct {
 // ProjectResolver looks up a project of the local environment.
 type ProjectResolver func(ctx context.Context, projectID string) (ProjectRef, error)
 
-// DeployEnv is the secret set resolved for one deploy. Hash identifies the set
-// without revealing it and is recorded with RecordDeployed once the deploy
-// succeeds.
-type DeployEnv struct {
-	Values map[string]string
-	Hash   string
-}
-
-// DriftChange reports a project whose secrets changed since its last deploy,
-// the first time a background check sees that change.
-type DriftChange struct {
-	ProjectID    string
-	ProjectName  string
-	AutoRedeploy bool
-}
-
 // fetchOptions tunes one fetch. Quiet fetches (background checks) log no
 // success event and log an error only when it differs from the last one.
 type fetchOptions struct {
@@ -114,9 +98,10 @@ func NewSecretSourceService(db *database.DB, eventService *event.EventService) *
 		eventService: eventService,
 		// Not the SSRF-safe client: self-hosted secret managers and bw serve
 		// normally live on private, VPN, tailnet, or Docker network addresses,
-		// which that client rejects. Creating a source requires the
+		// which that client rejects. Cloud metadata addresses are still
+		// refused (see transport.go), and creating a source requires the
 		// secret-sources:create permission.
-		httpClient: &http.Client{Timeout: providerTimeout},
+		httpClient: newSecretHTTPClientInternal(providerTimeout),
 		providers:  make(map[string]cachedProvider),
 	}
 }
@@ -357,199 +342,6 @@ func (s *SecretSourceService) Browse(ctx context.Context, sourceID string, query
 	return items, nil
 }
 
-// ---- Bindings ----
-
-// GetBinding returns the project's binding, or nil when it has none.
-func (s *SecretSourceService) GetBinding(ctx context.Context, projectID string) (*secretsourcetypes.Binding, error) {
-	binding, err := s.loadBindingInternal(ctx, projectID)
-	if errors.Is(err, common.ErrSecretBindingNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	dto := bindingToDTOInternal(binding)
-	return &dto, nil
-}
-
-func (s *SecretSourceService) UpsertBinding(ctx context.Context, projectID string, req secretsourcetypes.UpsertBindingRequest) (*secretsourcetypes.Binding, error) {
-	source, err := s.loadSourceInternal(ctx, req.SourceID)
-	if err != nil {
-		return nil, err
-	}
-	target, err := normalizeTargetInternal(source.Provider, req.Target)
-	if err != nil {
-		return nil, err
-	}
-
-	binding, err := s.loadBindingInternal(ctx, projectID)
-	switch {
-	case errors.Is(err, common.ErrSecretBindingNotFound):
-		salt, saltErr := newHashSaltInternal()
-		if saltErr != nil {
-			return nil, saltErr
-		}
-		binding = &ProjectSecretBinding{ProjectID: projectID, HashSalt: salt}
-	case err != nil:
-		return nil, err
-	}
-
-	// A different source or target makes the last check meaningless; the
-	// deployed hash stays, because the running containers still use it.
-	if binding.SourceID != source.ID || !sameTargetInternal(binding.Target, target) {
-		binding.LastSeenHash = nil
-		binding.LastNotifiedHash = nil
-		binding.LastCheckedAt = nil
-	}
-	binding.SourceID = source.ID
-	binding.Source = nil
-	binding.Target = target
-	binding.Required = req.Required
-	binding.Enabled = req.Enabled
-	binding.AutoRedeploy = req.AutoRedeploy
-	binding.LastFetchError = nil
-
-	if saveErr := s.db.WithContext(ctx).Save(binding).Error; saveErr != nil {
-		return nil, fmt.Errorf("failed to save project secret binding: %w", saveErr)
-	}
-	return s.GetBinding(ctx, projectID)
-}
-
-func (s *SecretSourceService) DeleteBinding(ctx context.Context, projectID string) error {
-	result := s.db.WithContext(ctx).Delete(&ProjectSecretBinding{}, "project_id = ?", projectID)
-	if result.Error != nil {
-		return fmt.Errorf("failed to delete project secret binding: %w", result.Error)
-	}
-	if result.RowsAffected == 0 {
-		return common.ErrSecretBindingNotFound
-	}
-	return nil
-}
-
-// CheckBinding fetches the bound secrets now and reports key names, .env keys
-// they override, and whether a redeploy is needed. No values are returned.
-func (s *SecretSourceService) CheckBinding(ctx context.Context, project ProjectRef, actor usertypes.Actor) (secretsourcetypes.CheckResult, error) {
-	binding, err := s.loadBindingInternal(ctx, project.ID)
-	if err != nil {
-		return secretsourcetypes.CheckResult{}, err
-	}
-	values, skipped, err := s.fetchInternal(ctx, binding, project, actor, fetchOptions{reason: "check"})
-	if err != nil {
-		return secretsourcetypes.CheckResult{}, err
-	}
-
-	hash := hashValuesInternal(binding.HashSalt, values)
-	s.recordSeenInternal(ctx, binding.ID, hash)
-
-	keys := sortedKeysInternal(values)
-	result := secretsourcetypes.CheckResult{
-		Keys:           keys,
-		OverriddenKeys: overriddenKeysInternal(ctx, project, keys),
-		InvalidKeys:    skipped,
-		FetchedAt:      time.Now(),
-		DeployedAt:     binding.DeployedAt,
-		NeverDeployed:  binding.DeployedHash == nil,
-	}
-	// An empty set is reported on its own; calling it drift adds nothing.
-	if binding.DeployedHash != nil && len(keys) > 0 {
-		result.RedeployNeeded = hash != *binding.DeployedHash
-	}
-	return result, nil
-}
-
-// ResolveDeployEnv fetches the project's bound secrets for a deploy. It
-// returns a nil Values map when the project has no enabled binding. When the
-// fetch fails or returns nothing usable, a required binding returns an error
-// and blocks the deploy; an optional one logs and lets the deploy continue.
-func (s *SecretSourceService) ResolveDeployEnv(ctx context.Context, project ProjectRef, actor usertypes.Actor) (DeployEnv, error) {
-	binding, err := s.loadBindingInternal(ctx, project.ID)
-	if errors.Is(err, common.ErrSecretBindingNotFound) {
-		return DeployEnv{}, nil
-	}
-	if err != nil {
-		return DeployEnv{}, err
-	}
-	if !binding.Enabled {
-		return DeployEnv{}, nil
-	}
-
-	values, _, err := s.fetchInternal(ctx, binding, project, actor, fetchOptions{reason: "deploy", requireKeys: binding.Required})
-	if err != nil {
-		if binding.Required {
-			return DeployEnv{}, err
-		}
-		slog.WarnContext(ctx, "optional secret binding failed; deploying without its secrets", "projectId", project.ID, "error", err)
-		return DeployEnv{}, nil
-	}
-	return DeployEnv{Values: values, Hash: hashValuesInternal(binding.HashSalt, values)}, nil
-}
-
-// RecordDeployed stores the hash of the secret set a successful deploy used.
-// The deploy resolves any pending drift, so the seen and notified hashes move
-// with it.
-func (s *SecretSourceService) RecordDeployed(ctx context.Context, projectID, hash string) {
-	if hash == "" {
-		return
-	}
-	err := s.db.WithContext(ctx).Model(&ProjectSecretBinding{}).Where("project_id = ?", projectID).
-		UpdateColumns(map[string]any{
-			"deployed_hash":      hash,
-			"deployed_at":        time.Now(),
-			"last_seen_hash":     hash,
-			"last_notified_hash": hash,
-		}).Error
-	if err != nil {
-		slog.WarnContext(ctx, "failed to record deployed secret hash", "projectId", projectID, "error", err)
-	}
-}
-
-// CheckDrift fetches every enabled, deployed binding and returns the projects
-// whose secrets changed since their last deploy. Each change is returned, and
-// logged as an event, only once; failures are logged when they first appear.
-func (s *SecretSourceService) CheckDrift(ctx context.Context, resolve ProjectResolver) []DriftChange {
-	var bindings []ProjectSecretBinding
-	err := s.db.WithContext(ctx).Preload("Source").
-		Where("enabled = ? AND deployed_hash IS NOT NULL", true).
-		Find(&bindings).Error
-	if err != nil {
-		slog.WarnContext(ctx, "failed to load secret bindings for drift check", "error", err)
-		return nil
-	}
-
-	var changes []DriftChange
-	for i := range bindings {
-		binding := &bindings[i]
-		project := ProjectRef{ID: binding.ProjectID, Name: binding.ProjectID}
-		if resolve != nil {
-			if resolved, resolveErr := resolve(ctx, binding.ProjectID); resolveErr == nil {
-				project = resolved
-			}
-		}
-
-		values, _, fetchErr := s.fetchInternal(ctx, binding, project, usertypes.SystemUser, fetchOptions{reason: "drift-check", quiet: true})
-		if fetchErr != nil || len(values) == 0 {
-			continue
-		}
-		hash := hashValuesInternal(binding.HashSalt, values)
-		s.recordSeenInternal(ctx, binding.ID, hash)
-		if binding.DeployedHash == nil || hash == *binding.DeployedHash {
-			continue
-		}
-		if binding.LastNotifiedHash != nil && hash == *binding.LastNotifiedHash {
-			continue
-		}
-
-		s.recordNotifiedInternal(ctx, binding.ID, hash)
-		s.logEventInternal(ctx, event.EventTypeProjectSecretsChanged, project, usertypes.SystemUser, database.JSON{
-			"sourceId":     binding.SourceID,
-			"target":       describeTargetInternal(binding),
-			"autoRedeploy": binding.AutoRedeploy,
-		})
-		changes = append(changes, DriftChange{ProjectID: project.ID, ProjectName: project.Name, AutoRedeploy: binding.AutoRedeploy})
-	}
-	return changes
-}
-
 // fetchInternal reads the binding's secrets, drops names that are not valid
 // environment variable names, records the outcome on the binding, and logs an
 // event without any secret values. With requireKeys, an empty result is a
@@ -743,18 +535,6 @@ func (s *SecretSourceService) loadSourceInternal(ctx context.Context, id string)
 		return nil, fmt.Errorf("failed to load secret source: %w", err)
 	}
 	return &source, nil
-}
-
-func (s *SecretSourceService) loadBindingInternal(ctx context.Context, projectID string) (*ProjectSecretBinding, error) {
-	var binding ProjectSecretBinding
-	err := s.db.WithContext(ctx).Preload("Source").Where("project_id = ?", projectID).First(&binding).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, common.ErrSecretBindingNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to load project secret binding: %w", err)
-	}
-	return &binding, nil
 }
 
 func (s *SecretSourceService) bindingCountsInternal(ctx context.Context) (map[string]int, error) {
@@ -1082,25 +862,4 @@ func sourceToDTOInternal(source *SecretSource, bindingCount int) secretsourcetyp
 		CreatedAt:          source.CreatedAt,
 		UpdatedAt:          source.UpdatedAt,
 	}
-}
-
-func bindingToDTOInternal(binding *ProjectSecretBinding) secretsourcetypes.Binding {
-	dto := secretsourcetypes.Binding{
-		ProjectID:      binding.ProjectID,
-		SourceID:       binding.SourceID,
-		Target:         binding.Target,
-		Required:       binding.Required,
-		Enabled:        binding.Enabled,
-		AutoRedeploy:   binding.AutoRedeploy,
-		RedeployNeeded: binding.redeployNeededInternal(),
-		DeployedAt:     binding.DeployedAt,
-		LastFetchedAt:  binding.LastFetchedAt,
-		LastCheckedAt:  binding.LastCheckedAt,
-		LastFetchError: binding.LastFetchError,
-	}
-	if binding.Source != nil {
-		dto.SourceName = binding.Source.Name
-		dto.Provider = binding.Source.Provider
-	}
-	return dto
 }

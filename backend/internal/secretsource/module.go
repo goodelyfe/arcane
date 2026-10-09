@@ -124,7 +124,7 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 		Description: "Fetch a binding target and return its variable names, without values, to prepare a project before binding it",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermSecretSourcesRead, h.TargetKeys)
+	}, authz.PermSecretSourcesUse, h.TargetKeys)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
 		OperationID: "listComposeServicesForSecrets",
@@ -147,43 +147,56 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 	}, authz.PermSecretSourcesRead, h.AddComposeRefs)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
-		OperationID: "getProjectSecretBinding",
+		OperationID: "listProjectSecretBindings",
 		Method:      "GET",
 		Path:        "/environments/{id}/projects/{projectId}/secrets",
-		Summary:     "Get a project's secret binding",
-		Description: "Get the secret source binding of a project, or null when it has none",
+		Summary:     "List a project's secret bindings",
+		Description: "Bindings apply in order; when two deliver the same variable, the earlier one wins.",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermProjectsRead, h.GetProjectBinding)
+	}, authz.PermProjectsRead, h.ListProjectBindings)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
-		OperationID: "upsertProjectSecretBinding",
-		Method:      "PUT",
+		OperationID: "createProjectSecretBinding",
+		Method:      "POST",
 		Path:        "/environments/{id}/projects/{projectId}/secrets",
-		Summary:     "Bind a project to a secret source",
-		Description: "Create or replace the project's secret binding; secrets are fetched at deploy time and never written to disk",
+		Summary:     "Bind a project to one more secret source target",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermProjectsUpdate, h.UpsertProjectBinding)
+		// A binding delivers anything the source's identity can read, so it
+		// also needs the right to use secret sources.
+		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUse),
+	}, authz.PermProjectsUpdate, h.CreateProjectBinding)
+
+	middleware.RegisterWithPermission(api, huma.Operation{
+		OperationID: "updateProjectSecretBinding",
+		Method:      "PUT",
+		Path:        "/environments/{id}/projects/{projectId}/secrets/{bindingId}",
+		Summary:     "Change one of a project's secret bindings",
+		Tags:        tags,
+		Security:    handlerutil.DefaultOperationSecurity(),
+		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUse),
+	}, authz.PermProjectsUpdate, h.UpdateProjectBinding)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
 		OperationID: "deleteProjectSecretBinding",
 		Method:      "DELETE",
-		Path:        "/environments/{id}/projects/{projectId}/secrets",
-		Summary:     "Remove a project's secret binding",
+		Path:        "/environments/{id}/projects/{projectId}/secrets/{bindingId}",
+		Summary:     "Remove one of a project's secret bindings",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
 	}, authz.PermProjectsUpdate, h.DeleteProjectBinding)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
-		OperationID: "checkProjectSecretBinding",
+		OperationID: "checkProjectSecretBindings",
 		Method:      "POST",
 		Path:        "/environments/{id}/projects/{projectId}/secrets/check",
 		Summary:     "Check a project's secrets",
-		Description: "Fetch the bound secrets now and report key names, overridden .env keys, and whether a redeploy is needed. Values are never returned.",
-		Tags:        tags,
-		Security:    handlerutil.DefaultOperationSecurity(),
-	}, authz.PermProjectsDeploy, h.CheckProjectBinding)
+		Description: "Fetch every binding now and report, per binding, key names, keys an earlier binding already delivers, " +
+			"keys no service uses, overridden .env keys, and whether a redeploy is needed. Values are never returned.",
+		Tags:     tags,
+		Security: handlerutil.DefaultOperationSecurity(),
+	}, authz.PermProjectsDeploy, h.CheckProjectBindings)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
 		OperationID: "planProjectSecretSetup",
@@ -193,9 +206,9 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 		Description: "List the variables the project's compose files and .env use and, for a target, where each stands in Infisical. Writes nothing; values are never returned.",
 		Tags:        tags,
 		Security:    handlerutil.DefaultOperationSecurity(),
-		// Setup writes with the source's setup identity, so it also needs the
-		// right to change secret sources.
-		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUpdate),
+		// Setup writes with the source's setup identity and binds the project,
+		// so it also needs the rights to change and to use secret sources.
+		Middlewares: append(middleware.RequirePermission(api, authz.PermSecretSourcesUpdate), middleware.RequirePermission(api, authz.PermSecretSourcesUse)...),
 	}, authz.PermProjectsUpdate, h.PlanProjectSetup)
 
 	middleware.RegisterWithPermission(api, huma.Operation{
@@ -208,8 +221,8 @@ func RegisterSecretSources(api huma.API, h *SecretSourceHandler) {
 			"and optionally remove the moved keys from the .env.",
 		Tags:     tags,
 		Security: handlerutil.DefaultOperationSecurity(),
-		// Setup writes with the source's setup identity, so it also needs the
-		// right to change secret sources.
-		Middlewares: middleware.RequirePermission(api, authz.PermSecretSourcesUpdate),
+		// Setup writes with the source's setup identity and binds the project,
+		// so it also needs the rights to change and to use secret sources.
+		Middlewares: append(middleware.RequirePermission(api, authz.PermSecretSourcesUpdate), middleware.RequirePermission(api, authz.PermSecretSourcesUse)...),
 	}, authz.PermProjectsUpdate, h.ApplyProjectSetup)
 }

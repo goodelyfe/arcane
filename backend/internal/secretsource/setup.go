@@ -134,7 +134,7 @@ func (s *SecretSourceService) PlanSetup(ctx context.Context, project ProjectRef,
 	if err != nil {
 		return secretsourcetypes.SetupPlan{}, err
 	}
-	existing, err := s.GetBinding(ctx, project.ID)
+	existing, err := s.loadBindingsInternal(ctx, project.ID)
 	if err != nil {
 		return secretsourcetypes.SetupPlan{}, err
 	}
@@ -147,7 +147,7 @@ func (s *SecretSourceService) PlanSetup(ctx context.Context, project ProjectRef,
 		CanWrite:             setupCtx.writer != nil,
 		Variables:            setupCtx.variables,
 		HasGitSource:         setupCtx.files.HasGitSource,
-		AlreadyBound:         existing != nil,
+		AlreadyBound:         len(existing) > 0,
 	}
 	writer := setupCtx.writer
 	if writer == nil {
@@ -290,7 +290,7 @@ func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef
 		Enabled:      true,
 		AutoRedeploy: req.AutoRedeploy,
 	}
-	binding, err := s.UpsertBinding(ctx, project.ID, bindingRequest)
+	binding, err := s.bindTargetInternal(ctx, project.ID, bindingRequest)
 	if err != nil {
 		return run.failInternal(setupStepBinding, err), nil
 	}
@@ -302,7 +302,7 @@ func (s *SecretSourceService) ApplySetup(ctx context.Context, project ProjectRef
 	if req.Required {
 		if verifyStep.Status == secretsourcetypes.SetupStepDone {
 			bindingRequest.Required = true
-			if binding, err = s.UpsertBinding(ctx, project.ID, bindingRequest); err != nil {
+			if binding, err = s.UpdateBinding(ctx, project.ID, binding.ID, bindingRequest); err != nil {
 				run.addResultInternal(setupStepVerify, verifyStep)
 				return run.failInternal(setupStepBinding, err), nil
 			}
