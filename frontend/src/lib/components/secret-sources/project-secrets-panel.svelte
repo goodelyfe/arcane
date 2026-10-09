@@ -368,7 +368,7 @@
 {#snippet summary(current: ProjectSecretBinding)}
 	<div class="space-y-4">
 		<div class="flex flex-wrap items-center gap-4 rounded-xl border border-border/70 bg-card/60 p-4 backdrop-blur-md">
-			<ProviderIcon provider={current.provider} class="size-12 rounded-xl p-2" />
+			<ProviderIcon provider={current.provider} class="size-12 rounded-xl p-2.5" />
 			<div class="min-w-0 flex-1 space-y-1">
 				<div class="flex flex-wrap items-center gap-2">
 					<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(current.provider) })}</h3>
@@ -553,7 +553,7 @@
 				<Select.Content>
 					{#each sources as source (source.id)}
 						<Select.Item value={source.id}>
-							<ProviderIcon provider={source.provider} class="size-5" />
+							<ProviderIcon provider={source.provider} class="size-6 rounded-md p-1" />
 							<div class="flex flex-col">
 								<span>{source.name}</span>
 								<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>
