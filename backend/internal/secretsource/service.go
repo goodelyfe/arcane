@@ -589,9 +589,15 @@ func (s *SecretSourceService) fetchInternal(
 	return values, skipped, nil
 }
 
+// updateFetchStatusInternal records the outcome of a fetch. last_fetched_at
+// only moves on success, so it always means "values last read at".
 func (s *SecretSourceService) updateFetchStatusInternal(ctx context.Context, bindingID string, at time.Time, fetchError *string) {
+	columns := map[string]any{"last_fetch_error": fetchError}
+	if fetchError == nil {
+		columns["last_fetched_at"] = at
+	}
 	err := s.db.WithContext(ctx).Model(&ProjectSecretBinding{}).Where("id = ?", bindingID).
-		UpdateColumns(map[string]any{"last_fetched_at": at, "last_fetch_error": fetchError}).Error
+		UpdateColumns(columns).Error
 	if err != nil {
 		slog.WarnContext(ctx, "failed to record secret fetch status", "bindingId", bindingID, "error", err)
 	}
