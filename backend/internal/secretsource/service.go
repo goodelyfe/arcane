@@ -31,6 +31,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/httpsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/onepassword"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/protonpass"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/vault"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
@@ -212,8 +213,8 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	}
 	newCredential := req.Credential != nil && *req.Credential != ""
 	if req.ClearCredential {
-		if source.Provider != secretsourcetypes.ProviderHTTP {
-			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("only an HTTP source's token can be removed"))
+		if !providerAcceptsCredentialInternal(source.Provider) || providerNeedsCredentialInternal(source.Provider) {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("only an optional token, such as an HTTP endpoint's, can be removed"))
 		}
 		source.Credential = ""
 	}
@@ -706,6 +707,11 @@ func (s *SecretSourceService) newProviderInternal(providerName string, settings 
 			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("1Password settings are required"))
 		}
 		return onepassword.New(s.httpClient, *settings.OnePassword, credential)
+	case secretsourcetypes.ProviderProtonPass:
+		if settings.ProtonPass == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("settings for Proton Pass are required"))
+		}
+		return protonpass.New(s.httpClient, *settings.ProtonPass, credential)
 	case secretsourcetypes.ProviderHTTP:
 		if settings.HTTP == nil {
 			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("endpoint settings are required"))
@@ -799,9 +805,11 @@ func providerNeedsCredentialInternal(providerName string) bool {
 
 // providerAcceptsCredentialInternal reports providers that store a
 // credential: the ones that need one, and HTTP, where a bearer token is
-// optional. Bitwarden's session lives in bw serve.
+// optional, and Proton Pass, whose kit may require one. Bitwarden's session
+// lives in bw serve.
 func providerAcceptsCredentialInternal(providerName string) bool {
-	return providerNeedsCredentialInternal(providerName) || providerName == secretsourcetypes.ProviderHTTP
+	return providerNeedsCredentialInternal(providerName) ||
+		providerName == secretsourcetypes.ProviderHTTP || providerName == secretsourcetypes.ProviderProtonPass
 }
 
 // endpointKeyInternal identifies where a source's credential is sent and how
@@ -817,6 +825,8 @@ func endpointKeyInternal(settings secretsourcetypes.SourceSettings) string {
 		return "doppler\x00" + settings.Doppler.APIURL
 	case settings.OnePassword != nil:
 		return "onepassword\x00" + settings.OnePassword.ServerURL
+	case settings.ProtonPass != nil:
+		return "protonpass\x00" + settings.ProtonPass.KitURL
 	case settings.HTTP != nil:
 		return "http\x00" + settings.HTTP.BaseURL
 	case settings.Bitwarden != nil:
@@ -857,6 +867,8 @@ func normalizeSettingsInternal(providerName string, settings secretsourcetypes.S
 		normalized.Doppler, err = doppler.NormalizeSettings(settings.Doppler)
 	case secretsourcetypes.ProviderOnePassword:
 		normalized.OnePassword, err = onepassword.NormalizeSettings(settings.OnePassword)
+	case secretsourcetypes.ProviderProtonPass:
+		normalized.ProtonPass, err = protonpass.NormalizeSettings(settings.ProtonPass)
 	case secretsourcetypes.ProviderHTTP:
 		normalized.HTTP, err = httpsource.NormalizeSettings(settings.HTTP)
 	default:
@@ -884,6 +896,8 @@ func normalizeTargetInternal(providerName string, target secretsourcetypes.Bindi
 		normalized.Doppler, err = doppler.NormalizeTarget(target.Doppler)
 	case secretsourcetypes.ProviderOnePassword:
 		normalized.OnePassword, err = onepassword.NormalizeTarget(target.OnePassword)
+	case secretsourcetypes.ProviderProtonPass:
+		normalized.ProtonPass, err = protonpass.NormalizeTarget(target.ProtonPass)
 	case secretsourcetypes.ProviderHTTP:
 		normalized.HTTP, err = httpsource.NormalizeTarget(target.HTTP)
 	default:
@@ -907,6 +921,8 @@ func describeTargetInternal(binding *ProjectSecretBinding) string {
 		return doppler.Describe(binding.Target.Doppler)
 	case binding.Target.OnePassword != nil:
 		return onepassword.Describe(binding.Target.OnePassword)
+	case binding.Target.ProtonPass != nil:
+		return protonpass.Describe(binding.Target.ProtonPass)
 	case binding.Target.HTTP != nil:
 		return httpsource.Describe(binding.Target.HTTP)
 	default:

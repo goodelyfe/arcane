@@ -63,9 +63,11 @@
 	const storedEndpoint = untrack(() => (sourceToEdit ? endpointKey(sourceToEdit.settings) : ''));
 	let clearHttpToken = $state(false);
 
-	// Everything except Bitwarden stores a credential; for HTTP it is optional.
+	// Everything except Bitwarden stores a credential; for HTTP and the Proton
+	// Pass kit it is an optional bearer token.
 	const usesCredential = $derived(provider !== 'bitwarden');
-	const credentialRequired = $derived(provider !== 'bitwarden' && provider !== 'http');
+	const optionalToken = $derived(provider === 'http' || provider === 'protonpass');
+	const credentialRequired = $derived(provider !== 'bitwarden' && !optionalToken);
 
 	function credentialLabel(current: SecretProvider): string {
 		switch (current) {
@@ -77,6 +79,8 @@
 				return m.onepassword_connect_token();
 			case 'http':
 				return m.http_bearer_token();
+			case 'protonpass':
+				return m.protonpass_kit_token();
 			default:
 				return m.secret_sources_client_secret();
 		}
@@ -137,6 +141,7 @@
 						requireCredential();
 						return;
 					case 'http':
+					case 'protonpass':
 						requireField('baseUrl', m.secret_sources_url_required());
 						if (endpointChanged && hasStoredSecret && !clearHttpToken && data.clientSecret === '') {
 							ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_reenter() });
@@ -182,7 +187,7 @@
 			setupToken: '',
 			apiUrl: sourceToEdit?.settings.doppler?.apiUrl ?? '',
 			serverUrl: sourceToEdit?.settings.onepassword?.serverUrl ?? '',
-			baseUrl: sourceToEdit?.settings.http?.baseUrl ?? ''
+			baseUrl: sourceToEdit?.settings.http?.baseUrl ?? sourceToEdit?.settings.protonpass?.kitUrl ?? ''
 		}))
 	);
 	let inputs = $derived(form.inputs);
@@ -211,6 +216,8 @@
 				return { onepassword: { serverUrl: inputs.serverUrl.value.trim() } };
 			case 'http':
 				return { http: { baseUrl: inputs.baseUrl.value.trim() } };
+			case 'protonpass':
+				return { protonpass: { kitUrl: inputs.baseUrl.value.trim() } };
 		}
 		return {
 			infisical: {
@@ -229,6 +236,7 @@
 			case 'vault':
 				return m.secret_sources_test_visible_mounts({ count: result.visibleCount });
 			case 'onepassword':
+			case 'protonpass':
 				return m.secret_sources_test_visible_vaults({ count: result.visibleCount });
 			default:
 				return result.visibleCount === 1
@@ -254,7 +262,7 @@
 					? inputs.address
 					: provider === 'onepassword'
 						? inputs.serverUrl
-						: provider === 'http'
+						: optionalToken
 							? inputs.baseUrl
 							: null;
 			if (urlInput && missing(urlInput, m.secret_sources_url_required())) return;
@@ -301,7 +309,7 @@
 		if (provider === 'vault' && vaultSetupToken && data.setupToken) setupCredential = data.setupToken;
 
 		if (isEditMode && sourceToEdit) {
-			const clearCredential = provider === 'http' && clearHttpToken && !credential ? true : undefined;
+			const clearCredential = optionalToken && clearHttpToken && !credential ? true : undefined;
 			onSubmit({
 				mode: 'edit',
 				id: sourceToEdit.id,
@@ -457,12 +465,12 @@
 					placeholder={hasStoredSecret ? m.common_keep_placeholder() : ''}
 					bind:input={inputs.clientSecret}
 				/>
-			{:else if provider === 'http'}
+			{:else if optionalToken}
 				<FormInput
-					label={m.http_base_url()}
+					label={provider === 'protonpass' ? m.protonpass_kit_url() : m.http_base_url()}
 					type="text"
-					placeholder="http://sops-kit:8080/secrets"
-					helpText={m.http_base_url_description()}
+					placeholder={provider === 'protonpass' ? 'http://pass-kit:8080' : 'http://sops-kit:8080/secrets'}
+					helpText={provider === 'protonpass' ? m.protonpass_kit_url_description() : m.http_base_url_description()}
 					bind:input={inputs.baseUrl}
 				/>
 				<FormInput
@@ -481,7 +489,11 @@
 						bind:checked={clearHttpToken}
 					/>
 				{/if}
-				<Alert.Root variant="info" icon={AlertIcon} description={m.http_contract_hint({ example: '{"DB_PASSWORD": "…"}' })} />
+				{#if provider === 'protonpass'}
+					<Alert.Root variant="info" icon={AlertIcon} description={m.protonpass_kit_hint()} />
+				{:else}
+					<Alert.Root variant="info" icon={AlertIcon} description={m.http_contract_hint({ example: '{"DB_PASSWORD": "…"}' })} />
+				{/if}
 			{:else}
 				<FormInput
 					label={m.secret_sources_site_url()}

@@ -12,10 +12,11 @@ const (
 	ProviderDoppler     = "doppler"
 	ProviderOnePassword = "onepassword"
 	ProviderHTTP        = "http"
+	ProviderProtonPass  = "protonpass"
 )
 
 // Providers lists every supported provider.
-var Providers = []string{ProviderInfisical, ProviderBitwarden, ProviderVault, ProviderDoppler, ProviderOnePassword, ProviderHTTP}
+var Providers = []string{ProviderInfisical, ProviderBitwarden, ProviderVault, ProviderDoppler, ProviderOnePassword, ProviderProtonPass, ProviderHTTP}
 
 // 1Password binding scopes.
 const (
@@ -92,6 +93,13 @@ type OnePasswordSettings struct {
 	ServerURL string `json:"serverUrl"`
 }
 
+// ProtonPassSettings points at a pass-kit sidecar, which runs Proton's
+// pass-cli with a personal access token. The credential, when set, is the
+// kit's bearer token.
+type ProtonPassSettings struct {
+	KitURL string `json:"kitUrl"`
+}
+
 // HTTPSettings points at any endpoint that answers GET with a flat JSON
 // object of names and values. The credential, when set, is sent as a bearer
 // token.
@@ -106,6 +114,7 @@ type SourceSettings struct {
 	Vault       *VaultSettings       `json:"vault,omitempty"`
 	Doppler     *DopplerSettings     `json:"doppler,omitempty"`
 	OnePassword *OnePasswordSettings `json:"onepassword,omitempty"`
+	ProtonPass  *ProtonPassSettings  `json:"protonpass,omitempty"`
 	HTTP        *HTTPSettings        `json:"http,omitempty"`
 }
 
@@ -182,6 +191,8 @@ const (
 	BrowseDopplerConfigs       = "configs"
 	BrowseOnePasswordVaults    = "vaults"
 	BrowseOnePasswordItems     = "items"
+	BrowseProtonPassVaults     = "vaults"
+	BrowseProtonPassItems      = "items"
 )
 
 // BrowseQuery selects what to list from a source for the binding pickers.
@@ -193,7 +204,7 @@ type BrowseQuery struct {
 	// Mount and KVVersion select the Vault/OpenBao mount for "paths".
 	Mount     string `json:"mount,omitempty"`
 	KVVersion int    `json:"kvVersion,omitempty"`
-	// VaultID selects the 1Password vault for "items".
+	// VaultID selects the 1Password or Proton Pass vault for "items".
 	VaultID string `json:"vaultId,omitempty"`
 }
 
@@ -248,6 +259,17 @@ type OnePasswordTarget struct {
 	Name string `json:"name,omitempty"`
 }
 
+// ProtonPassTarget selects a vault or one item in a vault. Scope uses the
+// 1Password values: in a vault, each item title is a variable; in an item,
+// each custom field is.
+type ProtonPassTarget struct {
+	Scope   string `json:"scope"`
+	VaultID string `json:"vaultId"`
+	ItemID  string `json:"itemId,omitempty"`
+	// Name is the vault or item name at bind time, for display.
+	Name string `json:"name,omitempty"`
+}
+
 // HTTPTarget selects a path under the endpoint's base URL. Empty reads the
 // base URL itself.
 type HTTPTarget struct {
@@ -261,6 +283,7 @@ type BindingTarget struct {
 	Vault       *VaultTarget       `json:"vault,omitempty"`
 	Doppler     *DopplerTarget     `json:"doppler,omitempty"`
 	OnePassword *OnePasswordTarget `json:"onepassword,omitempty"`
+	ProtonPass  *ProtonPassTarget  `json:"protonpass,omitempty"`
 	HTTP        *HTTPTarget        `json:"http,omitempty"`
 }
 

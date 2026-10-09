@@ -86,7 +86,8 @@ func newSetupWriterInternal(httpClient *http.Client, source *SecretSource) (setu
 			return nil, common.Classify(common.ErrSecretSourceInvalid, err)
 		}
 		return &vaultWriterInternal{setup: setup}, nil
-	case secretsourcetypes.ProviderDoppler, secretsourcetypes.ProviderOnePassword, secretsourcetypes.ProviderHTTP:
+	case secretsourcetypes.ProviderDoppler, secretsourcetypes.ProviderOnePassword,
+		secretsourcetypes.ProviderProtonPass, secretsourcetypes.ProviderHTTP:
 		// Read-only providers: setup lists the variables, and binding is manual.
 		return nil, nil
 	default:
