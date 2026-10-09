@@ -339,7 +339,9 @@
 				bind:open
 				cancelDisabled={applying}
 				submitAction="base"
-				submitLabel={selectedKeys.length === 1 ? m.secret_setup_apply_one() : m.secret_setup_apply({ count: selectedKeys.length })}
+				submitLabel={selectedKeys.length === 1
+					? m.secret_setup_apply_one()
+					: m.secret_setup_apply({ count: selectedKeys.length })}
 				submitDisabled={!canApply}
 				submitLoading={applying}
 				onSubmit={() => void apply()}
