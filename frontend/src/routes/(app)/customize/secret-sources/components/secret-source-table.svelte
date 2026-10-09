@@ -63,6 +63,8 @@
 				return source.settings.doppler?.apiUrl || 'https://api.doppler.com';
 			case 'onepassword':
 				return source.settings.onepassword?.serverUrl ?? '';
+			case 'protonpass':
+				return source.settings.protonpass?.kitUrl ?? '';
 			case 'http':
 				return source.settings.http?.baseUrl ?? '';
 			default:
@@ -76,6 +78,7 @@
 		vault: 'amber',
 		doppler: 'green',
 		onepassword: 'sky',
+		protonpass: 'purple',
 		http: 'teal'
 	};
 

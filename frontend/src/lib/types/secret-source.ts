@@ -1,4 +1,4 @@
-export type SecretProvider = 'infisical' | 'bitwarden' | 'vault' | 'doppler' | 'onepassword' | 'http';
+export type SecretProvider = 'infisical' | 'bitwarden' | 'vault' | 'doppler' | 'onepassword' | 'protonpass' | 'http';
 
 export type BitwardenScope = 'folder' | 'collection' | 'item';
 export type OnePasswordScope = 'vault' | 'item';
@@ -34,6 +34,10 @@ export interface OnePasswordSettings {
 	serverUrl: string;
 }
 
+export interface ProtonPassSettings {
+	kitUrl: string;
+}
+
 export interface HttpSettings {
 	baseUrl: string;
 }
@@ -44,6 +48,7 @@ export interface SourceSettings {
 	vault?: VaultSettings;
 	doppler?: DopplerSettings;
 	onepassword?: OnePasswordSettings;
+	protonpass?: ProtonPassSettings;
 	http?: HttpSettings;
 }
 
@@ -140,6 +145,9 @@ export interface OnePasswordTarget {
 	name?: string;
 }
 
+// Same shape as 1Password: a whole vault, or one item in it.
+export type ProtonPassTarget = OnePasswordTarget;
+
 export interface HttpTarget {
 	path?: string;
 }
@@ -150,6 +158,7 @@ export interface BindingTarget {
 	vault?: VaultTarget;
 	doppler?: DopplerTarget;
 	onepassword?: OnePasswordTarget;
+	protonpass?: ProtonPassTarget;
 	http?: HttpTarget;
 }
 

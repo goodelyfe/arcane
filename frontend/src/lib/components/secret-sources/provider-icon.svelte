@@ -9,6 +9,7 @@
 	import VaultIcon from 'virtual:icons/selfhst/hashicorp-vault';
 	import InfisicalIcon from 'virtual:icons/selfhst/infisical';
 	import InfisicalLightIcon from 'virtual:icons/selfhst/infisical-light';
+	import ProtonPassIcon from 'virtual:icons/selfhst/proton-pass';
 
 	import { ConnectionIcon } from '#lib/icons/index.js';
 	import type { SecretProvider } from '#lib/types/secret-source.js';
@@ -22,6 +23,7 @@
 		doppler: { light: DopplerIcon },
 		infisical: { light: InfisicalIcon, dark: InfisicalLightIcon },
 		onepassword: { light: OnePasswordIcon, dark: OnePasswordLightIcon },
+		protonpass: { light: ProtonPassIcon },
 		vault: { light: VaultIcon }
 	};
 

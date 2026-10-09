@@ -104,21 +104,31 @@
 		retry: false
 	}));
 
-	// ---- 1Password ----
-	const scopes: { value: OnePasswordScope; label: () => string; description: () => string }[] = [
-		{ value: 'vault', label: m.onepassword_scope_vault, description: m.onepassword_scope_vault_description },
-		{ value: 'item', label: m.onepassword_scope_item, description: m.onepassword_scope_item_description }
-	];
+	// ---- 1Password and Proton Pass (same target shape) ----
+	const vaultKey = $derived<'onepassword' | 'protonpass'>(provider === 'protonpass' ? 'protonpass' : 'onepassword');
+	const isVaultProvider = $derived(provider === 'onepassword' || provider === 'protonpass');
+	const scopes = $derived<{ value: OnePasswordScope; label: () => string; description: () => string }[]>([
+		{
+			value: 'vault',
+			label: m.onepassword_scope_vault,
+			description: provider === 'protonpass' ? m.protonpass_scope_vault_description : m.onepassword_scope_vault_description
+		},
+		{
+			value: 'item',
+			label: m.onepassword_scope_item,
+			description: provider === 'protonpass' ? m.protonpass_scope_item_description : m.onepassword_scope_item_description
+		}
+	]);
 	const opVaultsQuery = createQuery(() => ({
 		queryKey: queryKeys.secretSources.browse(sourceId, 'vaults'),
 		queryFn: () => secretSourceService.browse(sourceId, { kind: 'vaults' }),
-		enabled: provider === 'onepassword' && !!sourceId,
+		enabled: isVaultProvider && !!sourceId,
 		retry: false
 	}));
 	const opItemsQuery = createQuery(() => ({
-		queryKey: queryKeys.secretSources.browse(sourceId, 'items', target.onepassword?.vaultId ?? ''),
-		queryFn: () => secretSourceService.browse(sourceId, { kind: 'items', vaultId: target.onepassword?.vaultId }),
-		enabled: provider === 'onepassword' && !!sourceId && !!target.onepassword?.vaultId && target.onepassword?.scope === 'item',
+		queryKey: queryKeys.secretSources.browse(sourceId, 'items', target[vaultKey]?.vaultId ?? ''),
+		queryFn: () => secretSourceService.browse(sourceId, { kind: 'items', vaultId: target[vaultKey]?.vaultId }),
+		enabled: isVaultProvider && !!sourceId && !!target[vaultKey]?.vaultId && target[vaultKey]?.scope === 'item',
 		retry: false
 	}));
 </script>
@@ -247,15 +257,14 @@
 			{@render browseError(dopplerConfigsQuery.error)}
 		{/if}
 	{/if}
-{:else if provider === 'onepassword' && target.onepassword}
+{:else if (provider === 'onepassword' || provider === 'protonpass') && target[vaultKey]}
 	<div class="space-y-2">
 		<Label class="mb-0">{m.onepassword_scope()}</Label>
 		<RadioGroup.Root
 			class="mt-2"
-			value={target.onepassword.scope}
+			value={target[vaultKey].scope}
 			onValueChange={(value) =>
-				target.onepassword &&
-				(target.onepassword = { ...target.onepassword, scope: value as OnePasswordScope, itemId: '', name: '' })}
+				target[vaultKey] && (target[vaultKey] = { ...target[vaultKey]!, scope: value as OnePasswordScope, itemId: '', name: '' })}
 		>
 			<div class="grid gap-2">
 				{#each scopes as scope (scope.value)}
@@ -280,22 +289,23 @@
 		{:else}
 			<Select.Root
 				type="single"
-				value={target.onepassword.vaultId}
+				value={target[vaultKey].vaultId}
 				onValueChange={(value) => {
 					const vault = opVaultsQuery.data?.find((candidate) => candidate.id === value);
-					if (target.onepassword) {
-						target.onepassword = {
-							...target.onepassword,
+					const current = target[vaultKey];
+					if (current) {
+						target[vaultKey] = {
+							...current,
 							vaultId: value,
 							itemId: '',
-							name: target.onepassword.scope === 'vault' ? (vault?.name ?? '') : ''
+							name: current.scope === 'vault' ? (vault?.name ?? '') : ''
 						};
 					}
 				}}
 			>
 				<Select.Trigger id="op-vault" class="w-full">
 					<span
-						>{opVaultsQuery.data?.find((vault) => vault.id === target.onepassword?.vaultId)?.name ??
+						>{opVaultsQuery.data?.find((vault) => vault.id === target[vaultKey]?.vaultId)?.name ??
 							m.onepassword_select_vault()}</span
 					>
 				</Select.Trigger>
@@ -308,7 +318,7 @@
 		{/if}
 	</div>
 
-	{#if target.onepassword.scope === 'item' && target.onepassword.vaultId}
+	{#if target[vaultKey].scope === 'item' && target[vaultKey].vaultId}
 		<div class="space-y-2">
 			<Label for="op-item">{m.onepassword_item()}</Label>
 			{#if opItemsQuery.isPending}
@@ -318,14 +328,15 @@
 			{:else}
 				<Select.Root
 					type="single"
-					value={target.onepassword.itemId ?? ''}
+					value={target[vaultKey].itemId ?? ''}
 					onValueChange={(value) => {
 						const item = opItemsQuery.data?.find((candidate) => candidate.id === value);
-						if (target.onepassword) target.onepassword = { ...target.onepassword, itemId: value, name: item?.name ?? '' };
+						const current = target[vaultKey];
+						if (current) target[vaultKey] = { ...current, itemId: value, name: item?.name ?? '' };
 					}}
 				>
 					<Select.Trigger id="op-item" class="w-full">
-						<span>{target.onepassword.name || m.onepassword_select_item()}</span>
+						<span>{target[vaultKey].name || m.onepassword_select_item()}</span>
 					</Select.Trigger>
 					<Select.Content>
 						{#each opItemsQuery.data ?? [] as item (item.id)}
