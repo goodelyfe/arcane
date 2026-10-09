@@ -239,7 +239,7 @@ func (c *Client) sendInternal(ctx context.Context, method, path string, query ur
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("contact bw serve: %w", err)
+		return fmt.Errorf("bw serve is not reachable at %s; check that the container is running and shares a network with Arcane: %w", c.baseURL.Redacted(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
