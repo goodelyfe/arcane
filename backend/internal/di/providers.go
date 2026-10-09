@@ -282,6 +282,21 @@ func provideProjectServiceInternal(
 	return service
 }
 
+func provideContainerServiceInternal(
+	localEvent *event.EventService,
+	localDocker *docker.DockerClientService,
+	localImage *image.ImageService,
+	localSettings *settings.SettingsService,
+	projectService *project.ProjectService,
+	secretSources *secretsource.SecretSourceService,
+) *container.ContainerService {
+	service := container.NewContainerService(localEvent, localDocker, localImage, localSettings, projectService)
+	if secretSources != nil {
+		service.SetSecretFiller(secretSources)
+	}
+	return service
+}
+
 func provideSecretSourceModuleInternal(service *secretsource.SecretSourceService, projectService *project.ProjectService) *secretsource.Module {
 	return secretsource.New(service, projectService.SecretProjectRef)
 }

@@ -163,7 +163,10 @@ export interface BindingTarget {
 }
 
 export interface ProjectSecretBinding {
+	id: string;
 	projectId: string;
+	// Bindings apply in position order; the earlier one wins on a shared key.
+	position: number;
 	sourceId: string;
 	sourceName: string;
 	provider: SecretProvider;
@@ -184,16 +187,35 @@ export interface ProjectSecretBindingDto {
 	required: boolean;
 	enabled: boolean;
 	autoRedeploy: boolean;
+	position?: number;
 }
 
 export interface ProjectSecretCheckResult {
+	bindingId: string;
+	// Set when this binding's fetch failed.
+	error?: string;
 	keys: string[];
+	// Delivered by an earlier binding too; that binding's value is used.
+	shadowedKeys: string[];
+	// Not referenced by any service in the compose file.
+	unusedKeys: string[];
 	overriddenKeys: string[];
 	invalidKeys: string[];
 	redeployNeeded: boolean;
 	neverDeployed: boolean;
 	fetchedAt: string;
 	deployedAt?: string;
+}
+
+// One target of a source, read once (for example to fill a new container's environment).
+export interface SecretTargetRef {
+	sourceId: string;
+	target: BindingTarget;
+}
+
+export interface ProjectSecretsCheck {
+	bindings: ProjectSecretCheckResult[];
+	redeployNeeded: boolean;
 }
 
 export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder' | 'new-folder' | 'existing-folder' | 'kv-path';

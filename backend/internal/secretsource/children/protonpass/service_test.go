@@ -1,7 +1,6 @@
 package protonpass
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -65,42 +64,42 @@ func TestNormalizeTarget(t *testing.T) {
 
 func TestTestAndBrowse(t *testing.T) {
 	provider := newProviderInternal(t, "kit-token")
-	result := provider.Test(context.Background())
+	result := provider.Test(t.Context())
 	assert.True(t, result.OK, result.Message)
 	assert.Equal(t, 2, result.VisibleCount)
 
-	vaults, err := provider.Browse(context.Background(), secretsourcetypes.BrowseQuery{Kind: "vaults"})
+	vaults, err := provider.Browse(t.Context(), secretsourcetypes.BrowseQuery{Kind: "vaults"})
 	require.NoError(t, err)
 	assert.Equal(t, []secretsourcetypes.BrowseItem{{ID: "S1==", Name: "Arcane"}, {ID: "S2", Name: "zeta"}}, vaults)
 
-	items, err := provider.Browse(context.Background(), secretsourcetypes.BrowseQuery{Kind: "items", VaultID: "S1=="})
+	items, err := provider.Browse(t.Context(), secretsourcetypes.BrowseQuery{Kind: "items", VaultID: "S1=="})
 	require.NoError(t, err)
 	assert.Equal(t, []secretsourcetypes.BrowseItem{
 		{ID: "I1", Name: "DB_PASSWORD", Detail: "login"},
 		{ID: "I2", Name: "web", Detail: "custom"},
 	}, items)
 
-	_, err = provider.Browse(context.Background(), secretsourcetypes.BrowseQuery{Kind: "items"})
+	_, err = provider.Browse(t.Context(), secretsourcetypes.BrowseQuery{Kind: "items"})
 	require.Error(t, err)
 }
 
 func TestFetch(t *testing.T) {
 	provider := newProviderInternal(t, "kit-token")
-	values, skipped, err := provider.Fetch(context.Background(), secretsourcetypes.BindingTarget{
+	values, skipped, err := provider.Fetch(t.Context(), secretsourcetypes.BindingTarget{
 		ProtonPass: &secretsourcetypes.ProtonPassTarget{Scope: "vault", VaultID: "S1=="},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"DB_PASSWORD": "pw"}, values)
 	assert.Equal(t, []string{"my item"}, skipped)
 
-	values, skipped, err = provider.Fetch(context.Background(), secretsourcetypes.BindingTarget{
+	values, skipped, err = provider.Fetch(t.Context(), secretsourcetypes.BindingTarget{
 		ProtonPass: &secretsourcetypes.ProtonPassTarget{Scope: "item", VaultID: "S1==", ItemID: "I2"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"PORT": "8080"}, values)
 	assert.Equal(t, []string{"OTP"}, skipped)
 
-	_, _, err = provider.Fetch(context.Background(), secretsourcetypes.BindingTarget{
+	_, _, err = provider.Fetch(t.Context(), secretsourcetypes.BindingTarget{
 		ProtonPass: &secretsourcetypes.ProtonPassTarget{Scope: "vault", VaultID: "missing"},
 	})
 	require.Error(t, err)
@@ -108,6 +107,6 @@ func TestFetch(t *testing.T) {
 
 func TestWrongKitToken(t *testing.T) {
 	provider := newProviderInternal(t, "wrong")
-	result := provider.Test(context.Background())
+	result := provider.Test(t.Context())
 	assert.False(t, result.OK)
 }
