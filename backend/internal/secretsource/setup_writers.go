@@ -12,6 +12,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/common"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/bitwarden"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/vault"
 	infisicalclient "github.com/getarcaneapp/arcane/backend/v2/pkg/infisical"
 )
 
@@ -69,6 +70,25 @@ func newSetupWriterInternal(httpClient *http.Client, source *SecretSource) (setu
 			return nil, common.Classify(common.ErrSecretSourceInvalid, err)
 		}
 		return &bitwardenWriterInternal{setup: setup}, nil
+	case secretsourcetypes.ProviderVault:
+		if source.Settings.Vault == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("vault settings are required"))
+		}
+		setupToken, err := decryptCredentialInternal(source.SetupCredential)
+		if err != nil {
+			return nil, err
+		}
+		setup, err := vault.NewSetup(httpClient, *source.Settings.Vault, setupToken)
+		if errors.Is(err, vault.ErrNoSetupToken) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, err)
+		}
+		return &vaultWriterInternal{setup: setup}, nil
+	case secretsourcetypes.ProviderDoppler, secretsourcetypes.ProviderOnePassword, secretsourcetypes.ProviderHTTP:
+		// Read-only providers: setup lists the variables, and binding is manual.
+		return nil, nil
 	default:
 		return nil, common.Classify(common.ErrSecretSourceInvalid, fmt.Errorf("unknown provider %q", source.Provider))
 	}
@@ -240,6 +260,50 @@ func (w *bitwardenWriterInternal) BindingTarget(target secretsourcetypes.SetupTa
 		ID:    target.FolderID,
 		Name:  target.FolderName,
 	}}
+}
+
+// ---- Vault / OpenBao ----
+
+type vaultWriterInternal struct {
+	setup *vault.Setup
+}
+
+func (w *vaultWriterInternal) NormalizeTarget(target secretsourcetypes.SetupTarget, arcaneProjectName string) (secretsourcetypes.SetupTarget, error) {
+	return vault.NormalizeSetupTarget(target, arcaneProjectName)
+}
+
+// CreatesContainer is false: a KV path needs no container, and writing to an
+// existing secret adds to it.
+func (w *vaultWriterInternal) CreatesContainer(secretsourcetypes.SetupTarget) bool {
+	return false
+}
+
+func (w *vaultWriterInternal) NameTaken(context.Context, secretsourcetypes.SetupTarget) (bool, error) {
+	return false, nil
+}
+
+func (w *vaultWriterInternal) Prepare(_ context.Context, target secretsourcetypes.SetupTarget) (secretsourcetypes.SetupTarget, []secretsourcetypes.SetupStep, error) {
+	return target, []secretsourcetypes.SetupStep{skippedStepInternal(setupStepFolder, "Not needed: the secret is created at "+target.Mount+"/"+target.SecretPath)}, nil
+}
+
+func (w *vaultWriterInternal) RemoteValues(ctx context.Context, target secretsourcetypes.SetupTarget) (map[string]string, error) {
+	return w.setup.RemoteValues(ctx, target)
+}
+
+func (w *vaultWriterInternal) Write(ctx context.Context, target secretsourcetypes.SetupTarget, values map[string]string, create, overwrite []string) (bool, error) {
+	return false, w.setup.Write(ctx, target, values, create, overwrite)
+}
+
+func (w *vaultWriterInternal) DeployIdentity(context.Context) (*secretsourcetypes.SetupIdentity, error) {
+	return nil, nil
+}
+
+func (w *vaultWriterInternal) Grant(context.Context, secretsourcetypes.SetupTarget) secretsourcetypes.SetupStep {
+	return skippedStepInternal(setupStepGrant, "Policies are managed in Vault/OpenBao; the deploy token needs read on this path")
+}
+
+func (w *vaultWriterInternal) BindingTarget(target secretsourcetypes.SetupTarget) secretsourcetypes.BindingTarget {
+	return secretsourcetypes.BindingTarget{Vault: vault.BindingTarget(target)}
 }
 
 // ---- Steps ----
