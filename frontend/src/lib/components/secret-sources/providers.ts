@@ -26,6 +26,14 @@ export const providerOptions: { value: SecretProvider; label: () => string; desc
 	{ value: 'http', label: m.secret_sources_provider_http, description: m.secret_sources_provider_http_description }
 ];
 
+// The choices in alphabetical order by their (translated) name. The generic HTTP
+// endpoint is a catch-all rather than a product, so it stays last.
+export function sortedProviderOptions() {
+	const named = providerOptions.filter((option) => option.value !== 'http');
+	named.sort((a, b) => a.label().localeCompare(b.label()));
+	return [...named, ...providerOptions.filter((option) => option.value === 'http')];
+}
+
 export type GenericProvider = 'vault' | 'doppler' | 'onepassword' | 'http';
 
 export function isGenericProvider(provider: SecretProvider | undefined): provider is GenericProvider {

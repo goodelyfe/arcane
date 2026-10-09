@@ -21,6 +21,7 @@
 	import ComposeRefsPicker from './compose-refs-picker.svelte';
 	import { type NewProjectSecrets, selectionToAssignments } from './compose-refs.js';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
+	import ProviderIcon from './provider-icon.svelte';
 	import ProviderTargetFields from './provider-target-fields.svelte';
 	import { isGenericProvider, isGenericTargetComplete, pickGenericTarget, providerLabel } from './providers.js';
 
@@ -143,6 +144,7 @@
 						<Select.Content>
 							{#each sources as source (source.id)}
 								<Select.Item value={source.id}>
+									<ProviderIcon provider={source.provider} class="size-5" />
 									<div class="flex flex-col">
 										<span>{source.name}</span>
 										<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>
