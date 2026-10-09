@@ -1,6 +1,8 @@
-export type SecretProvider = 'infisical' | 'bitwarden';
+export type SecretProvider = 'infisical' | 'bitwarden' | 'vault' | 'doppler' | 'onepassword' | 'http';
 
 export type BitwardenScope = 'folder' | 'collection' | 'item';
+export type OnePasswordScope = 'vault' | 'item';
+export type VaultAuthMethod = 'token' | 'approle';
 
 export interface InfisicalSettings {
 	siteUrl: string;
@@ -14,9 +16,35 @@ export interface BitwardenSettings {
 	serveUrl: string;
 }
 
+export interface VaultSettings {
+	address: string;
+	namespace?: string;
+	authMethod: VaultAuthMethod;
+	roleId?: string;
+	appRoleMount?: string;
+	// A separate token for guided setup is stored as the setup credential.
+	setupToken?: boolean;
+}
+
+export interface DopplerSettings {
+	apiUrl?: string;
+}
+
+export interface OnePasswordSettings {
+	serverUrl: string;
+}
+
+export interface HttpSettings {
+	baseUrl: string;
+}
+
 export interface SourceSettings {
 	infisical?: InfisicalSettings;
 	bitwarden?: BitwardenSettings;
+	vault?: VaultSettings;
+	doppler?: DopplerSettings;
+	onepassword?: OnePasswordSettings;
+	http?: HttpSettings;
 }
 
 export interface SecretSource {
@@ -67,6 +95,9 @@ export interface SecretBrowseQuery {
 	projectId?: string;
 	environment?: string;
 	path?: string;
+	mount?: string;
+	kvVersion?: number;
+	vaultId?: string;
 }
 
 export interface SecretBrowseItem {
@@ -90,9 +121,35 @@ export interface BitwardenTarget {
 	name?: string;
 }
 
+export interface VaultTarget {
+	mount: string;
+	path: string;
+	kvVersion: number;
+}
+
+export interface DopplerTarget {
+	project?: string;
+	config?: string;
+}
+
+export interface OnePasswordTarget {
+	scope: OnePasswordScope;
+	vaultId: string;
+	itemId?: string;
+	name?: string;
+}
+
+export interface HttpTarget {
+	path?: string;
+}
+
 export interface BindingTarget {
 	infisical?: InfisicalTarget;
 	bitwarden?: BitwardenTarget;
+	vault?: VaultTarget;
+	doppler?: DopplerTarget;
+	onepassword?: OnePasswordTarget;
+	http?: HttpTarget;
 }
 
 export interface ProjectSecretBinding {
@@ -129,7 +186,7 @@ export interface ProjectSecretCheckResult {
 	deployedAt?: string;
 }
 
-export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder' | 'new-folder' | 'existing-folder';
+export type SetupMode = 'new-project' | 'existing-project' | 'shared-folder' | 'new-folder' | 'existing-folder' | 'kv-path';
 export type SetupValues = 'import' | 'placeholder';
 export type SetupEnvFile = 'keep' | 'remove';
 export type SetupRemoteState = 'missing' | 'same' | 'different' | 'exists' | 'unknown';
@@ -143,6 +200,8 @@ export interface SetupTarget {
 	secretPath?: string;
 	folderName?: string;
 	folderId?: string;
+	mount?: string;
+	kvVersion?: number;
 }
 
 export interface SetupPlanRequest {

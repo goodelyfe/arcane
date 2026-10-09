@@ -44,10 +44,13 @@ type TestSourceInput struct {
 
 type BrowseSourceInput struct {
 	ID          string `path:"id" doc:"Secret source ID"`
-	Kind        string `query:"kind" doc:"What to list: projects or folders (Infisical); folders, collections, or items (Bitwarden)"`
-	ProjectID   string `query:"projectId" doc:"Infisical project ID, for folders"`
+	Kind        string `query:"kind" doc:"What to list. Infisical: projects, folders. Bitwarden: folders, collections, items. Vault: mounts, paths. Doppler: projects, configs. 1Password: vaults, items"`
+	ProjectID   string `query:"projectId" doc:"Infisical project ID, for folders; Doppler project, for configs"`
 	Environment string `query:"environment" doc:"Infisical environment slug, for folders"`
-	Path        string `query:"path" doc:"Infisical folder path to list" default:"/"`
+	Path        string `query:"path" doc:"Infisical folder path, or Vault/OpenBao path prefix, to list" default:"/"`
+	Mount       string `query:"mount" doc:"Vault/OpenBao KV mount, for paths"`
+	KVVersion   int    `query:"kvVersion" doc:"Vault/OpenBao KV version (1 or 2), for paths"`
+	VaultID     string `query:"vaultId" doc:"1Password vault ID, for items"`
 }
 
 type ProjectBindingInput struct {
@@ -139,6 +142,9 @@ func (h *SecretSourceHandler) Browse(ctx context.Context, input *BrowseSourceInp
 		ProjectID:   input.ProjectID,
 		Environment: input.Environment,
 		Path:        input.Path,
+		Mount:       input.Mount,
+		KVVersion:   input.KVVersion,
+		VaultID:     input.VaultID,
 	})
 	if err != nil {
 		return nil, httpErrorInternal(err)

@@ -52,7 +52,7 @@
 		open: boolean;
 		environmentId: string;
 		projectId: string;
-		// Infisical and Bitwarden sources.
+		// Sources that can write: Infisical, Bitwarden, and Vault/OpenBao.
 		sources: SecretSource[];
 		onDone: () => void | Promise<void>;
 		// Opens the compose reference picker for keys the compose files do not use yet.
@@ -68,9 +68,12 @@
 		)
 	);
 	const provider = $derived(sources.find((source) => source.id === sourceId)?.provider ?? 'infisical');
-	let mode = $state<SetupMode>(
-		untrack(() => (sources.find((source) => source.id === sourceId)?.provider === 'bitwarden' ? 'new-folder' : 'new-project'))
-	);
+	function defaultMode(sourceProvider: string | undefined): SetupMode {
+		if (sourceProvider === 'bitwarden') return 'new-folder';
+		if (sourceProvider === 'vault') return 'kv-path';
+		return 'new-project';
+	}
+	let mode = $state<SetupMode>(untrack(() => defaultMode(sources.find((source) => source.id === sourceId)?.provider)));
 	const createsContainer = $derived(mode === 'new-project' || mode === 'new-folder');
 	let projectName = $state('');
 	let folderName = $state('');
@@ -78,10 +81,15 @@
 	let existingProjectId = $state('');
 	let environment = $state('prod');
 	let secretPath = $state('');
+	let vaultMount = $state('secret');
+	let vaultKv = $state(2);
 
 	// Typing in the name or path waits a moment before asking Infisical again.
 	let debouncedTarget = $state<SetupTarget | null>(null);
 	const target = $derived.by<SetupTarget | null>(() => {
+		if (mode === 'kv-path') {
+			return { mode, mount: vaultMount.trim(), kvVersion: vaultKv, secretPath: secretPath.trim() };
+		}
 		if (mode === 'new-folder') {
 			return { mode, folderName: folderName.trim() };
 		}
@@ -140,6 +148,7 @@
 		untrack(() => {
 			projectName = plan.suggestedProjectName;
 			folderName = plan.suggestedFolderName;
+			if (plan.provider === 'vault' && !secretPath) secretPath = plan.suggestedSecretPath;
 			applyDefaultSelection(plan.variables);
 		});
 	});
@@ -205,7 +214,7 @@
 	const canApply = $derived(
 		!!plan?.canWrite &&
 			!!target &&
-			(provider === 'bitwarden' || !!environment) &&
+			(provider === 'bitwarden' || provider === 'vault' || !!environment) &&
 			selectedKeys.length > 0 &&
 			!(createsContainer && plan.projectNameTaken) &&
 			!planQuery.isFetching &&
@@ -246,6 +255,9 @@
 	);
 
 	function modeOptions(current: string) {
+		if (current === 'vault') {
+			return [{ value: 'kv-path', label: m.secret_setup_mode_kv_path(), description: m.secret_setup_mode_kv_path_description() }];
+		}
 		if (current === 'bitwarden') {
 			return [
 				{
@@ -361,7 +373,8 @@
 					sourceId = value;
 					existingProjectId = '';
 					existingFolderId = '';
-					mode = sources.find((source) => source.id === value)?.provider === 'bitwarden' ? 'new-folder' : 'new-project';
+					mode = defaultMode(sources.find((source) => source.id === value)?.provider);
+					secretPath = '';
 					prefilled = false;
 				}}
 			>
@@ -390,7 +403,9 @@
 				variant="warning-subtle"
 				icon={AlertTriangleIcon}
 				heading={m.secret_setup_no_setup_identity()}
-				description={m.secret_setup_no_setup_identity_description()}
+				description={provider === 'vault'
+					? m.secret_setup_no_setup_token_description()
+					: m.secret_setup_no_setup_identity_description()}
 			/>
 			<ArcaneButton
 				action="base"
@@ -424,6 +439,28 @@
 
 			{#if provider === 'bitwarden'}
 				{@render bitwardenFields()}
+			{:else if provider === 'vault'}
+				<div class="flex flex-col gap-4 sm:flex-row sm:flex-wrap">
+					<div class="flex-1 space-y-2">
+						<Label for="setup-vault-mount">{m.vault_mount()}</Label>
+						<Input id="setup-vault-mount" mono placeholder="secret" bind:value={vaultMount} />
+					</div>
+					<div class="space-y-2">
+						<Label for="setup-vault-kv">{m.vault_kv_version()}</Label>
+						<Select.Root type="single" value={String(vaultKv)} onValueChange={(value) => (vaultKv = Number(value))}>
+							<Select.Trigger id="setup-vault-kv" class="w-28"><span>KV v{vaultKv}</span></Select.Trigger>
+							<Select.Content>
+								<Select.Item value="2">KV v2</Select.Item>
+								<Select.Item value="1">KV v1</Select.Item>
+							</Select.Content>
+						</Select.Root>
+					</div>
+					<div class="w-full space-y-2">
+						<Label for="setup-vault-path">{m.vault_secret_path()}</Label>
+						<Input id="setup-vault-path" mono bind:value={secretPath} placeholder={plan.suggestedSecretPath} />
+						<p class="text-xs text-muted-foreground">{m.secret_setup_kv_path_hint()}</p>
+					</div>
+				</div>
 			{:else}
 				<div class="grid gap-4 sm:grid-cols-2">
 					{#if mode === 'new-project'}

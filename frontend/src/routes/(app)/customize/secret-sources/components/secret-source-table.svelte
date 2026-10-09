@@ -5,7 +5,8 @@
 	import type { ColumnSpec, MobileFieldVisibility } from '#lib/components/arcane-table/index.js';
 	import RowActionsMenu from '#lib/components/arcane-table/row-actions-menu.svelte';
 	import IfPermitted from '#lib/components/if-permitted.svelte';
-	import { Badge } from '#lib/components/ui/badge/index.js';
+	import { providerLabel } from '#lib/components/secret-sources/providers.js';
+	import { Badge, type BadgeVariant } from '#lib/components/ui/badge/index.js';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
 	import { EditIcon, GlobeIcon, LockIcon, ClockIcon, TestIcon } from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
@@ -52,13 +53,30 @@
 
 	// Where Arcane connects for this source. An empty Infisical site URL means Infisical Cloud.
 	function endpointOf(source: SecretSource): string {
-		if (source.provider === 'bitwarden') return source.settings.bitwarden?.serveUrl ?? '';
-		return source.settings.infisical?.siteUrl || 'https://app.infisical.com';
+		switch (source.provider) {
+			case 'bitwarden':
+				return source.settings.bitwarden?.serveUrl ?? '';
+			case 'vault':
+				return source.settings.vault?.address ?? '';
+			case 'doppler':
+				return source.settings.doppler?.apiUrl || 'https://api.doppler.com';
+			case 'onepassword':
+				return source.settings.onepassword?.serverUrl ?? '';
+			case 'http':
+				return source.settings.http?.baseUrl ?? '';
+			default:
+				return source.settings.infisical?.siteUrl || 'https://app.infisical.com';
+		}
 	}
 
-	function providerLabel(source: SecretSource): string {
-		return source.provider === 'bitwarden' ? m.secret_sources_provider_bitwarden() : m.secret_sources_provider_infisical();
-	}
+	const providerBadges: Record<SecretSource['provider'], BadgeVariant> = {
+		infisical: 'violet',
+		bitwarden: 'blue',
+		vault: 'amber',
+		doppler: 'green',
+		onepassword: 'sky',
+		http: 'teal'
+	};
 
 	function testLabel(source: SecretSource): string {
 		if (!source.lastTestedAt) return m.secret_sources_never_tested();
@@ -95,7 +113,7 @@
 {#snippet NameCell({ item }: { item: SecretSource })}
 	<div class="flex items-center gap-2">
 		<span class="font-medium">{item.name}</span>
-		<Badge variant={item.provider === 'bitwarden' ? 'blue' : 'violet'} size="sm">{providerLabel(item)}</Badge>
+		<Badge variant={providerBadges[item.provider]} size="sm">{providerLabel(item.provider)}</Badge>
 	</div>
 {/snippet}
 

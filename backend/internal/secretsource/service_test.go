@@ -183,7 +183,95 @@ func TestCreateSourceValidatesPerProvider(t *testing.T) {
 	assert.Nil(t, vault.Settings.Infisical, "settings of another provider must be dropped")
 	assert.Equal(t, "http://bw-serve:8087", vault.Settings.Bitwarden.ServeURL)
 
-	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{Name: "Unknown", Provider: "vault"})
+	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{Name: "Unknown", Provider: "nope"})
+	require.ErrorIs(t, err, common.ErrValidation)
+}
+
+func TestCreateSourceCredentialsForNewProviders(t *testing.T) {
+	service, db := setupSecretSourceServiceTestInternal(t)
+
+	// Vault/OpenBao, Doppler, and 1Password need a credential.
+	needs := map[string]secretsourcetypes.SourceSettings{
+		secretsourcetypes.ProviderVault:       {Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200"}},
+		secretsourcetypes.ProviderDoppler:     {Doppler: &secretsourcetypes.DopplerSettings{}},
+		secretsourcetypes.ProviderOnePassword: {OnePassword: &secretsourcetypes.OnePasswordSettings{ServerURL: "http://op-connect-api:8080"}},
+	}
+	for provider, settings := range needs {
+		_, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{Name: "no " + provider, Provider: provider, Settings: settings})
+		require.ErrorIs(t, err, common.ErrValidation, provider)
+
+		created, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{Name: provider, Provider: provider, Settings: settings, Credential: "tok"})
+		require.NoError(t, err, provider)
+		assert.True(t, created.HasCredential, provider)
+	}
+
+	// The HTTP token is optional.
+	open, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "kit", Provider: secretsourcetypes.ProviderHTTP,
+		Settings: secretsourcetypes.SourceSettings{HTTP: &secretsourcetypes.HTTPSettings{BaseURL: "http://sops-kit:8080/"}},
+	})
+	require.NoError(t, err)
+	assert.False(t, open.HasCredential)
+	assert.Equal(t, "http://sops-kit:8080", open.Settings.HTTP.BaseURL)
+
+	withToken, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "kit with token", Provider: secretsourcetypes.ProviderHTTP, Credential: "bearer",
+		Settings: secretsourcetypes.SourceSettings{HTTP: &secretsourcetypes.HTTPSettings{BaseURL: "http://sops-kit:8080"}},
+	})
+	require.NoError(t, err)
+	assert.True(t, withToken.HasCredential)
+
+	// A Vault setup token is stored apart from the deploy token and needs
+	// its secret when first enabled.
+	_, err = service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "bao no setup secret", Provider: secretsourcetypes.ProviderVault, Credential: "read",
+		Settings: secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200", SetupToken: true}},
+	})
+	require.ErrorIs(t, err, common.ErrValidation)
+
+	bao, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "bao", Provider: secretsourcetypes.ProviderVault, Credential: "read", SetupCredential: "write",
+		Settings: secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200", SetupToken: true}},
+	})
+	require.NoError(t, err)
+	assert.True(t, bao.HasSetupCredential)
+	var stored SecretSource
+	require.NoError(t, db.First(&stored, "id = ?", bao.ID).Error)
+	setupPlain, err := crypto.Decrypt(stored.SetupCredential)
+	require.NoError(t, err)
+	assert.Equal(t, "write", setupPlain)
+
+	// Turning the setup token off deletes it.
+	off := secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200"}}
+	updated, err := service.UpdateSource(t.Context(), bao.ID, secretsourcetypes.UpdateSourceRequest{Settings: &off})
+	require.NoError(t, err)
+	assert.False(t, updated.HasSetupCredential)
+	assert.True(t, updated.HasCredential)
+}
+
+func TestUpsertBindingNormalizesNewProviderTargets(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+	bao, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "bao", Provider: secretsourcetypes.ProviderVault, Credential: "read",
+		Settings: secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200"}},
+	})
+	require.NoError(t, err)
+
+	binding, err := service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+		SourceID: bao.ID, Enabled: true,
+		Target: secretsourcetypes.BindingTarget{
+			Vault:   &secretsourcetypes.VaultTarget{Path: "/apps/web/"},
+			Doppler: &secretsourcetypes.DopplerTarget{Project: "ignored", Config: "ignored"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, &secretsourcetypes.VaultTarget{Mount: "secret", Path: "apps/web", KVVersion: 2}, binding.Target.Vault)
+	assert.Nil(t, binding.Target.Doppler, "targets of another provider must be dropped")
+
+	_, err = service.UpsertBinding(t.Context(), "project-1", secretsourcetypes.UpsertBindingRequest{
+		SourceID: bao.ID, Enabled: true,
+		Target: secretsourcetypes.BindingTarget{Vault: &secretsourcetypes.VaultTarget{Path: "apps/../sys"}},
+	})
 	require.ErrorIs(t, err, common.ErrValidation)
 }
 

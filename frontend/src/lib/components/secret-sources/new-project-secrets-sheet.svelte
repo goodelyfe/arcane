@@ -21,6 +21,8 @@
 	import ComposeRefsPicker from './compose-refs-picker.svelte';
 	import { type NewProjectSecrets, selectionToAssignments } from './compose-refs.js';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
+	import ProviderTargetFields from './provider-target-fields.svelte';
+	import { isGenericProvider, isGenericTargetComplete, pickGenericTarget, providerLabel } from './providers.js';
 
 	let {
 		open = $bindable(false),
@@ -50,6 +52,7 @@
 		expandReferences: true
 	});
 	let bitwardenTarget = $state<BitwardenTarget>({ scope: 'folder', id: '', name: '' });
+	let genericTarget = $state<BindingTarget>({});
 	let required = $state(true);
 	let autoRedeploy = $state(false);
 
@@ -59,7 +62,9 @@
 			? { infisical: infisicalTarget }
 			: provider === 'bitwarden' && bitwardenTarget.id
 				? { bitwarden: bitwardenTarget }
-				: null
+				: isGenericProvider(provider) && isGenericTargetComplete(provider, genericTarget)
+					? pickGenericTarget(provider, genericTarget)
+					: null
 	);
 
 	let keys = $state<string[] | null>(null);
@@ -127,6 +132,7 @@
 						value={sourceId}
 						onValueChange={(value) => {
 							sourceId = value;
+							genericTarget = {};
 							keys = null;
 							selection.clear();
 						}}
@@ -139,11 +145,7 @@
 								<Select.Item value={source.id}>
 									<div class="flex flex-col">
 										<span>{source.name}</span>
-										<span class="text-xs text-muted-foreground">
-											{source.provider === 'bitwarden'
-												? m.secret_sources_provider_bitwarden()
-												: m.secret_sources_provider_infisical()}
-										</span>
+										<span class="text-xs text-muted-foreground">{providerLabel(source.provider)}</span>
 									</div>
 								</Select.Item>
 							{/each}
@@ -158,6 +160,10 @@
 				{:else if sourceId && provider === 'bitwarden'}
 					{#key sourceId}
 						<BitwardenTargetFields {sourceId} bind:target={bitwardenTarget} />
+					{/key}
+				{:else if sourceId && isGenericProvider(provider)}
+					{#key sourceId}
+						<ProviderTargetFields {sourceId} {provider} bind:target={genericTarget} />
 					{/key}
 				{/if}
 

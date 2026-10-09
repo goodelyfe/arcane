@@ -48,7 +48,10 @@ class SecretSourceService extends BaseAPIService {
 			kind: query.kind,
 			projectId: query.projectId || undefined,
 			environment: query.environment || undefined,
-			path: query.path || undefined
+			path: query.path || undefined,
+			mount: query.mount || undefined,
+			kvVersion: query.kvVersion || undefined,
+			vaultId: query.vaultId || undefined
 		};
 		const response = await this.api.get(`/secret-sources/${encodeURIComponent(id)}/browse`, { params });
 		return response.data?.data ?? [];

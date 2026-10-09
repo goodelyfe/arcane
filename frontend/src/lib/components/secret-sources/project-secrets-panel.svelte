@@ -26,6 +26,7 @@
 	import { projectService } from '#lib/services/project-service.js';
 	import { secretSourceService } from '#lib/services/secret-source-service.js';
 	import type {
+		BindingTarget,
 		BitwardenTarget,
 		ComposeRefsResult,
 		InfisicalTarget,
@@ -42,6 +43,15 @@
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
 	import ComposeRefsSheet from './compose-refs-sheet.svelte';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
+	import ProviderTargetFields from './provider-target-fields.svelte';
+	import {
+		describeGenericTarget,
+		isGenericProvider,
+		isGenericTargetComplete,
+		pickGenericTarget,
+		providerCanSetUp,
+		providerLabel
+	} from './providers.js';
 	import SecretSetupSheet from './secret-setup-sheet.svelte';
 
 	let {
@@ -73,8 +83,8 @@
 		enabled: canListSources
 	}));
 	const sources = $derived(sourcesQuery.data ?? []);
-	// Setup can write to Infisical (with a setup identity) and to Bitwarden through bw serve.
-	const setupSources = $derived(sources.filter((source) => source.provider === 'infisical' || source.provider === 'bitwarden'));
+	// Setup writes to Infisical and Vault/OpenBao (with a setup identity or token) and to Bitwarden through bw serve.
+	const setupSources = $derived(sources.filter((source) => providerCanSetUp(source.provider)));
 	const canSetup = $derived(canEdit && hasPermission('secret-sources:update'));
 
 	// ---- Guided setup ----
@@ -138,6 +148,8 @@
 	let autoRedeploy = $state(false);
 	let infisicalTarget = $state<InfisicalTarget>(emptyInfisicalTarget());
 	let bitwardenTarget = $state<BitwardenTarget>(emptyBitwardenTarget());
+	// Vault/OpenBao, Doppler, 1Password, and HTTP targets.
+	let genericTarget = $state<BindingTarget>({});
 
 	function emptyInfisicalTarget(): InfisicalTarget {
 		return { projectId: '', environment: '', secretPath: '/', includeImports: true, expandReferences: true };
@@ -156,6 +168,7 @@
 		autoRedeploy = binding?.autoRedeploy ?? false;
 		infisicalTarget = binding?.target.infisical ? { ...binding.target.infisical } : emptyInfisicalTarget();
 		bitwardenTarget = binding?.target.bitwarden ? { ...binding.target.bitwarden } : emptyBitwardenTarget();
+		genericTarget = binding ? structuredClone(binding.target) : {};
 		editing = true;
 	}
 
@@ -163,12 +176,14 @@
 		sourceId = value;
 		infisicalTarget = emptyInfisicalTarget();
 		bitwardenTarget = emptyBitwardenTarget();
+		genericTarget = {};
 	}
 
 	const draftValid = $derived.by(() => {
 		if (!sourceId) return false;
 		if (draftProvider === 'infisical') return !!infisicalTarget.projectId.trim() && !!infisicalTarget.environment.trim();
 		if (draftProvider === 'bitwarden') return !!bitwardenTarget.id;
+		if (isGenericProvider(draftProvider)) return isGenericTargetComplete(draftProvider, genericTarget);
 		return false;
 	});
 
@@ -190,7 +205,7 @@
 		if (bitwarden) {
 			return `${scopeLabel(bitwarden.scope)} · ${bitwarden.name || bitwarden.id}`;
 		}
-		return '';
+		return describeGenericTarget(current.target);
 	}
 
 	function scopeLabel(scope: BitwardenTarget['scope']): string {
@@ -204,13 +219,15 @@
 		}
 	}
 
-	function providerLabel(provider: SecretProvider | undefined): string {
-		return provider === 'bitwarden' ? m.secret_sources_provider_bitwarden() : m.secret_sources_provider_infisical();
-	}
-
 	async function invalidateBinding() {
 		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.binding(environmentId, projectId) });
 		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.list() });
+	}
+
+	function targetForSave(): BindingTarget {
+		if (draftProvider === 'bitwarden') return { bitwarden: bitwardenTarget };
+		if (isGenericProvider(draftProvider)) return pickGenericTarget(draftProvider, genericTarget);
+		return { infisical: infisicalTarget };
 	}
 
 	async function save() {
@@ -219,7 +236,7 @@
 			result: await tryCatch(
 				secretSourceService.saveBinding(environmentId, projectId, {
 					sourceId,
-					target: draftProvider === 'bitwarden' ? { bitwarden: bitwardenTarget } : { infisical: infisicalTarget },
+					target: targetForSave(),
 					required,
 					enabled,
 					autoRedeploy
@@ -563,6 +580,10 @@
 		{:else if sourceId && draftProvider === 'bitwarden'}
 			{#key sourceId}
 				<BitwardenTargetFields {sourceId} bind:target={bitwardenTarget} />
+			{/key}
+		{:else if sourceId && isGenericProvider(draftProvider)}
+			{#key sourceId}
+				<ProviderTargetFields {sourceId} provider={draftProvider} bind:target={genericTarget} />
 			{/key}
 		{/if}
 

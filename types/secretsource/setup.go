@@ -20,6 +20,9 @@ const (
 	SetupModeNewFolder = "new-folder"
 	// SetupModeExistingFolder uses a Bitwarden folder that already exists.
 	SetupModeExistingFolder = "existing-folder"
+	// SetupModeKVPath writes one Vault or OpenBao secret at a KV path,
+	// creating it when missing and adding to it when present.
+	SetupModeKVPath = "kv-path"
 )
 
 // How setup fills the secrets it creates.
@@ -72,6 +75,10 @@ type SetupTarget struct {
 	FolderName string `json:"folderName,omitempty"`
 	// FolderID selects an existing Bitwarden folder (existing-folder).
 	FolderID string `json:"folderId,omitempty"`
+	// Mount and KVVersion select the Vault or OpenBao KV mount (kv-path);
+	// SecretPath is the secret's path in it.
+	Mount     string `json:"mount,omitempty"`
+	KVVersion int    `json:"kvVersion,omitempty"`
 }
 
 type SetupPlanRequest struct {

@@ -27,7 +27,11 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/database"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/event"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/bitwarden"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/doppler"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/httpsource"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/onepassword"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/vault"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
 
@@ -157,10 +161,10 @@ func (s *SecretSourceService) CreateSource(ctx context.Context, req secretsource
 		return nil, err
 	}
 	credential := ""
-	if providerNeedsCredentialInternal(req.Provider) {
-		if req.Credential == "" {
-			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("a client secret is required"))
-		}
+	if providerNeedsCredentialInternal(req.Provider) && req.Credential == "" {
+		return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New(credentialLabelInternal(req.Provider)+" is required"))
+	}
+	if providerAcceptsCredentialInternal(req.Provider) && req.Credential != "" {
 		if credential, err = crypto.Encrypt(req.Credential); err != nil {
 			return nil, fmt.Errorf("failed to encrypt credential: %w", err)
 		}
@@ -205,7 +209,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 		}
 		source.Settings = settings
 	}
-	if req.Credential != nil && *req.Credential != "" && providerNeedsCredentialInternal(source.Provider) {
+	if req.Credential != nil && *req.Credential != "" && providerAcceptsCredentialInternal(source.Provider) {
 		encrypted, encryptErr := crypto.Encrypt(*req.Credential)
 		if encryptErr != nil {
 			return nil, fmt.Errorf("failed to encrypt credential: %w", encryptErr)
@@ -668,6 +672,26 @@ func (s *SecretSourceService) newProviderInternal(providerName string, settings 
 			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("bitwarden settings are required"))
 		}
 		return bitwarden.New(s.httpClient, *settings.Bitwarden)
+	case secretsourcetypes.ProviderVault:
+		if settings.Vault == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("vault settings are required"))
+		}
+		return vault.New(s.httpClient, *settings.Vault, credential)
+	case secretsourcetypes.ProviderDoppler:
+		if settings.Doppler == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("doppler settings are required"))
+		}
+		return doppler.New(s.httpClient, *settings.Doppler, credential)
+	case secretsourcetypes.ProviderOnePassword:
+		if settings.OnePassword == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("1Password settings are required"))
+		}
+		return onepassword.New(s.httpClient, *settings.OnePassword, credential)
+	case secretsourcetypes.ProviderHTTP:
+		if settings.HTTP == nil {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("endpoint settings are required"))
+		}
+		return httpsource.New(s.httpClient, *settings.HTTP, credential)
 	default:
 		return nil, common.Classify(common.ErrSecretSourceInvalid, fmt.Errorf("unknown provider %q", providerName))
 	}
@@ -742,8 +766,38 @@ func (s *SecretSourceService) ensureNameAvailableInternal(ctx context.Context, n
 
 // ---- Pure helpers ----
 
+// providerNeedsCredentialInternal reports providers that cannot connect
+// without a stored credential.
 func providerNeedsCredentialInternal(providerName string) bool {
-	return providerName == secretsourcetypes.ProviderInfisical
+	switch providerName {
+	case secretsourcetypes.ProviderInfisical, secretsourcetypes.ProviderVault,
+		secretsourcetypes.ProviderDoppler, secretsourcetypes.ProviderOnePassword:
+		return true
+	default:
+		return false
+	}
+}
+
+// providerAcceptsCredentialInternal reports providers that store a
+// credential: the ones that need one, and HTTP, where a bearer token is
+// optional. Bitwarden's session lives in bw serve.
+func providerAcceptsCredentialInternal(providerName string) bool {
+	return providerNeedsCredentialInternal(providerName) || providerName == secretsourcetypes.ProviderHTTP
+}
+
+func credentialLabelInternal(providerName string) string {
+	switch providerName {
+	case secretsourcetypes.ProviderInfisical:
+		return "a client secret"
+	case secretsourcetypes.ProviderVault:
+		return "a token or AppRole secret ID"
+	case secretsourcetypes.ProviderDoppler:
+		return "a Doppler token"
+	case secretsourcetypes.ProviderOnePassword:
+		return "a Connect token"
+	default:
+		return "a credential"
+	}
 }
 
 // normalizeSettingsInternal validates the settings of one provider and drops
@@ -756,8 +810,16 @@ func normalizeSettingsInternal(providerName string, settings secretsourcetypes.S
 		normalized.Infisical, err = infisical.NormalizeSettings(settings.Infisical)
 	case secretsourcetypes.ProviderBitwarden:
 		normalized.Bitwarden, err = bitwarden.NormalizeSettings(settings.Bitwarden)
+	case secretsourcetypes.ProviderVault:
+		normalized.Vault, err = vault.NormalizeSettings(settings.Vault)
+	case secretsourcetypes.ProviderDoppler:
+		normalized.Doppler, err = doppler.NormalizeSettings(settings.Doppler)
+	case secretsourcetypes.ProviderOnePassword:
+		normalized.OnePassword, err = onepassword.NormalizeSettings(settings.OnePassword)
+	case secretsourcetypes.ProviderHTTP:
+		normalized.HTTP, err = httpsource.NormalizeSettings(settings.HTTP)
 	default:
-		err = fmt.Errorf("unknown provider %q; use %s or %s", providerName, secretsourcetypes.ProviderInfisical, secretsourcetypes.ProviderBitwarden)
+		err = fmt.Errorf("unknown provider %q; use one of %s", providerName, strings.Join(secretsourcetypes.Providers, ", "))
 	}
 	if err != nil {
 		return secretsourcetypes.SourceSettings{}, common.Classify(common.ErrSecretSourceInvalid, err)
@@ -775,6 +837,14 @@ func normalizeTargetInternal(providerName string, target secretsourcetypes.Bindi
 		normalized.Infisical, err = infisical.NormalizeTarget(target.Infisical)
 	case secretsourcetypes.ProviderBitwarden:
 		normalized.Bitwarden, err = bitwarden.NormalizeTarget(target.Bitwarden)
+	case secretsourcetypes.ProviderVault:
+		normalized.Vault, err = vault.NormalizeTarget(target.Vault)
+	case secretsourcetypes.ProviderDoppler:
+		normalized.Doppler, err = doppler.NormalizeTarget(target.Doppler)
+	case secretsourcetypes.ProviderOnePassword:
+		normalized.OnePassword, err = onepassword.NormalizeTarget(target.OnePassword)
+	case secretsourcetypes.ProviderHTTP:
+		normalized.HTTP, err = httpsource.NormalizeTarget(target.HTTP)
 	default:
 		err = fmt.Errorf("unknown provider %q", providerName)
 	}
@@ -790,6 +860,14 @@ func describeTargetInternal(binding *ProjectSecretBinding) string {
 		return infisical.Describe(binding.Target.Infisical)
 	case binding.Target.Bitwarden != nil:
 		return bitwarden.Describe(binding.Target.Bitwarden)
+	case binding.Target.Vault != nil:
+		return vault.Describe(binding.Target.Vault)
+	case binding.Target.Doppler != nil:
+		return doppler.Describe(binding.Target.Doppler)
+	case binding.Target.OnePassword != nil:
+		return onepassword.Describe(binding.Target.OnePassword)
+	case binding.Target.HTTP != nil:
+		return httpsource.Describe(binding.Target.HTTP)
 	default:
 		return "an unknown target"
 	}
@@ -801,11 +879,18 @@ func sameTargetInternal(a, b secretsourcetypes.BindingTarget) bool {
 	return leftErr == nil && rightErr == nil && string(left) == string(right)
 }
 
+// setupClientIDInternal names the setup identity a stored setup credential
+// belongs to, or "" when the source has none: the Infisical setup client ID,
+// or a fixed marker for a Vault/OpenBao setup token.
 func setupClientIDInternal(settings secretsourcetypes.SourceSettings) string {
-	if settings.Infisical == nil {
+	switch {
+	case settings.Infisical != nil:
+		return settings.Infisical.SetupClientID
+	case settings.Vault != nil && settings.Vault.SetupToken:
+		return "vault-setup-token"
+	default:
 		return ""
 	}
-	return settings.Infisical.SetupClientID
 }
 
 // applySetupCredentialInternal keeps the setup credential consistent with the
@@ -819,7 +904,7 @@ func applySetupCredentialInternal(source *SecretSource, previousClientID, secret
 	}
 	if secret == "" {
 		if source.SetupCredential == "" || clientID != previousClientID {
-			return common.Classify(common.ErrSecretSourceInvalid, errors.New("enter the setup identity's client secret"))
+			return common.Classify(common.ErrSecretSourceInvalid, errors.New("enter the setup identity's secret"))
 		}
 		return nil
 	}
@@ -840,6 +925,11 @@ func connectionFingerprintInternal(source *SecretSource) string {
 		deployOnly := *fingerprintSettings.Infisical
 		deployOnly.SetupClientID = ""
 		fingerprintSettings.Infisical = &deployOnly
+	}
+	if fingerprintSettings.Vault != nil {
+		deployOnly := *fingerprintSettings.Vault
+		deployOnly.SetupToken = false
+		fingerprintSettings.Vault = &deployOnly
 	}
 	settings, err := json.Marshal(fingerprintSettings)
 	if err != nil {
