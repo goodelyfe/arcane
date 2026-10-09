@@ -105,7 +105,7 @@
 
 {#snippet UsageCell({ item }: { item: SecretSource })}
 	<Badge variant={item.bindingCount > 0 ? 'blue' : 'gray'} size="sm">
-		{m.secret_sources_used_by({ count: item.bindingCount })}
+		{item.bindingCount === 1 ? m.secret_sources_used_by_one() : m.secret_sources_used_by({ count: item.bindingCount })}
 	</Badge>
 {/snippet}
 

@@ -73,7 +73,7 @@
 			bind:open
 			cancelDisabled={applying}
 			submitAction="save"
-			submitLabel={m.compose_refs_apply({ count: selection.size })}
+			submitLabel={selection.size === 1 ? m.compose_refs_apply_one() : m.compose_refs_apply({ count: selection.size })}
 			submitDisabled={selection.size === 0 || applying}
 			submitLoading={applying}
 			onSubmit={() => void apply()}
