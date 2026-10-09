@@ -1,5 +1,5 @@
 -- +goose Up
-CREATE TABLE secret_sources (
+CREATE TABLE IF NOT EXISTS secret_sources (
     id TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ,
@@ -12,9 +12,9 @@ CREATE TABLE secret_sources (
     last_test_error TEXT
 );
 
-CREATE UNIQUE INDEX idx_secret_sources_name ON secret_sources(name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_secret_sources_name ON secret_sources(name);
 
-CREATE TABLE project_secret_bindings (
+CREATE TABLE IF NOT EXISTS project_secret_bindings (
     id TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ,
@@ -34,8 +34,8 @@ CREATE TABLE project_secret_bindings (
     last_fetch_error TEXT
 );
 
-CREATE UNIQUE INDEX idx_project_secret_bindings_project ON project_secret_bindings(project_id);
-CREATE INDEX idx_project_secret_bindings_source ON project_secret_bindings(source_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_secret_bindings_project ON project_secret_bindings(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_secret_bindings_source ON project_secret_bindings(source_id);
 
 -- +goose Down
 DROP TABLE IF EXISTS project_secret_bindings;
