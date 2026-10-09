@@ -19,6 +19,23 @@ import (
 // DefaultMount is the KV mount a dev-mode server creates.
 const DefaultMount = "secret"
 
+// reservedMounts are API paths that are never KV mounts. Reading them with the
+// deploy token could return the token itself (auth/token/lookup-self) or
+// server internals, so bindings and browsing refuse them.
+var reservedMounts = map[string]bool{"sys": true, "auth": true, "identity": true, "cubbyhole": true}
+
+// CheckMount rejects a mount that is not a plain KV path.
+func CheckMount(mount string) error {
+	if err := checkPathInternal(mount); err != nil {
+		return fmt.Errorf("invalid mount: %w", err)
+	}
+	first, _, _ := strings.Cut(mount, "/")
+	if reservedMounts[strings.ToLower(first)] {
+		return fmt.Errorf("%q is a system path, not a KV mount", first)
+	}
+	return nil
+}
+
 // Provider reads secrets from one Vault or OpenBao server.
 type Provider struct {
 	client *vault.Client
@@ -37,6 +54,7 @@ func NormalizeSettings(settings *secretsourcetypes.VaultSettings) (*secretsource
 		Address:    address.String(),
 		Namespace:  strings.Trim(strings.TrimSpace(settings.Namespace), "/"),
 		AuthMethod: strings.TrimSpace(settings.AuthMethod),
+		SetupToken: settings.SetupToken,
 	}
 	switch normalized.AuthMethod {
 	case "", secretsourcetypes.VaultAuthToken:
@@ -69,8 +87,8 @@ func NormalizeTarget(target *secretsourcetypes.VaultTarget) (*secretsourcetypes.
 	if path == "" {
 		return nil, errors.New("a secret path is required, e.g. apps/immich")
 	}
-	if err := checkPathInternal(mount); err != nil {
-		return nil, fmt.Errorf("invalid mount: %w", err)
+	if err := CheckMount(mount); err != nil {
+		return nil, err
 	}
 	if err := checkPathInternal(path); err != nil {
 		return nil, fmt.Errorf("invalid secret path: %w", err)
@@ -152,6 +170,14 @@ func (p *Provider) Browse(ctx context.Context, query secretsourcetypes.BrowseQue
 		mount := strings.Trim(query.Mount, "/")
 		if mount == "" {
 			mount = DefaultMount
+		}
+		if err := CheckMount(mount); err != nil {
+			return nil, err
+		}
+		if prefix := strings.Trim(query.Path, "/"); prefix != "" {
+			if err := checkPathInternal(prefix); err != nil {
+				return nil, fmt.Errorf("invalid path: %w", err)
+			}
 		}
 		version := 2
 		if query.KVVersion == 1 {

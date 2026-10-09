@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/getarcaneapp/arcane/backend/v2/pkg/secretapi"
 )
 
 func TestGetWithTokenAndPath(t *testing.T) {
@@ -46,5 +48,6 @@ func TestGetRejectsNonObject(t *testing.T) {
 	client, err := NewClient(server.Client(), server.URL, "")
 	require.NoError(t, err)
 	_, err = client.Get(t.Context(), "")
-	assert.ErrorContains(t, err, "decode")
+	assert.ErrorIs(t, err, secretapi.ErrUnexpectedShape)
+	assert.NotContains(t, err.Error(), `"a"`, "decode errors must not quote the body")
 }
