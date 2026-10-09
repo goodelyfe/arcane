@@ -102,7 +102,6 @@ var ServiceOptions = fx.Options(
 		provideImageService,
 		build.NewBuildService,
 		project.NewLifecycleService,
-		container.NewContainerService,
 		dashboard.NewDashboardService,
 		network.NewNetworkService,
 		port.NewPortService,
@@ -151,6 +150,19 @@ var ServiceOptions = fx.Options(
 			service := project.NewProjectService(db, localSettings, localEvent, localImage, localDocker, localBuild, lifecycleService, localRegistry, cfg, localKv, localEnvironment.GetEnabledRegistryCredentials)
 			service.SetSecretEnvResolver(secretSources)
 			secretSources.SetProjectFileAccess(service)
+			return service
+		},
+		func(
+			localEvent *event.EventService,
+			localDocker *docker.DockerClientService,
+			localImage *image.ImageService,
+			localSettings *settings.SettingsService,
+			projectService *project.ProjectService,
+			localKv *kv.KVService,
+			secretSources *secretsource.SecretSourceService,
+		) *container.ContainerService {
+			service := container.NewContainerService(localEvent, localDocker, localImage, localSettings, projectService, localKv)
+			service.SetSecretFiller(secretSources)
 			return service
 		},
 		provideBackupEngine,

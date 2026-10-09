@@ -11,7 +11,17 @@
 	import { Label } from '#lib/components/ui/label/index.js';
 	import * as Select from '#lib/components/ui/select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
-	import { AlertIcon, AlertTriangleIcon, CheckIcon, LockIcon, RefreshIcon, VariableIcon, ZapIcon } from '#lib/icons/index.js';
+	import {
+		AlertIcon,
+		AlertTriangleIcon,
+		ArrowDownIcon,
+		ArrowUpIcon,
+		CheckIcon,
+		LockIcon,
+		RefreshIcon,
+		VariableIcon,
+		ZapIcon
+	} from '#lib/icons/index.js';
 	import { m } from '#lib/paraglide/messages.js';
 	import { queryKeys } from '#lib/query/query-keys.js';
 	import { projectService } from '#lib/services/project-service.js';
@@ -23,7 +33,9 @@
 		InfisicalTarget,
 		ProjectSecretBinding,
 		ProjectSecretCheckResult,
-		SecretProvider
+		ProjectSecretsCheck,
+		SecretProvider,
+		SecretSource
 	} from '#lib/types/secret-source.js';
 	import { extractApiErrorMessage, handleApiResultWithCallbacks } from '#lib/utils/api.js';
 	import { hasPermission } from '#lib/utils/auth.js';
@@ -58,16 +70,18 @@
 
 	const queryClient = useQueryClient();
 
-	const canEdit = $derived(hasPermission('projects:update', environmentId));
+	// Binding delivers whatever the source can read, so it also needs secret-sources:use.
+	const canEdit = $derived(hasPermission('projects:update', environmentId) && hasPermission('secret-sources:use'));
+	const canRemove = $derived(hasPermission('projects:update', environmentId));
 	const canCheck = $derived(hasPermission('projects:deploy', environmentId));
 	const canListSources = $derived(hasPermission('secret-sources:list') && hasPermission('secret-sources:read'));
 
-	const bindingQuery = createQuery(() => ({
-		queryKey: queryKeys.secretSources.binding(environmentId, projectId),
-		queryFn: () => secretSourceService.getBinding(environmentId, projectId),
+	const bindingsQuery = createQuery(() => ({
+		queryKey: queryKeys.secretSources.bindings(environmentId, projectId),
+		queryFn: () => secretSourceService.listBindings(environmentId, projectId),
 		enabled: !!environmentId && !!projectId
 	}));
-	const binding = $derived<ProjectSecretBinding | null>(bindingQuery.data ?? null);
+	const bindings = $derived<ProjectSecretBinding[]>(bindingsQuery.data ?? []);
 
 	const sourcesQuery = createQuery(() => ({
 		queryKey: queryKeys.secretSources.list(),
@@ -79,11 +93,22 @@
 	const setupSources = $derived(sources.filter((source) => providerCanSetUp(source.provider)));
 	const canSetup = $derived(canEdit && hasPermission('secret-sources:update'));
 
+	// A binding can take more variables when its provider writes and its target
+	// holds more than one item: a single Bitwarden item cannot.
+	function canMoveMoreInto(binding: ProjectSecretBinding): boolean {
+		if (!providerCanSetUp(binding.provider)) return false;
+		if (binding.provider === 'bitwarden' && binding.target.bitwarden?.scope === 'item') return false;
+		return setupSources.some((source) => source.id === binding.sourceId);
+	}
+
 	// ---- Guided setup ----
 	let setupOpen = $state(false);
 	let setupSession = $state(0);
+	let setupChoices = $state<SecretSource[]>([]);
 
-	function openSetup() {
+	// Without a binding, setup offers every writable source; from a binding, only its own.
+	function openSetup(binding?: ProjectSecretBinding) {
+		setupChoices = binding ? setupSources.filter((source) => source.id === binding.sourceId) : setupSources;
 		setupSession += 1;
 		setupOpen = true;
 	}
@@ -91,13 +116,13 @@
 	// ---- Compose references ----
 	let composeRefsOpen = $state(false);
 	let composeRefsSession = $state(0);
-	let composeRefsLoading = $state(false);
+	let composeRefsLoading = $state<string | null>(null);
 	let composeRefsCompose = $state('');
 	let composeRefsKeys = $state<string[]>([]);
 
-	// Opens the picker for keys, or for every key of the current binding.
-	async function openComposeRefs(keys?: string[]) {
-		composeRefsLoading = true;
+	// Opens the picker for keys, or for every key of a binding.
+	async function openComposeRefs(keys?: string[], binding?: ProjectSecretBinding) {
+		composeRefsLoading = binding?.id ?? 'setup';
 		const projectResult = await tryCatch(projectService.getProjectForEnvironment(environmentId, projectId));
 		let keyList = keys;
 		let keyError: unknown = null;
@@ -106,7 +131,7 @@
 			keyList = keysResult.data?.keys;
 			keyError = keysResult.error;
 		}
-		composeRefsLoading = false;
+		composeRefsLoading = null;
 		if (projectResult.error || keyError || !keyList) {
 			toast.error(m.compose_refs_load_failed(), {
 				description: extractApiErrorMessage(projectResult.error ?? keyError)
@@ -128,11 +153,13 @@
 			return;
 		}
 		toast.success(m.compose_refs_saved({ count: added }));
+		checkResult = null;
 		await invalidateAll();
 	}
 
 	// ---- Editor state ----
-	let editing = $state(false);
+	// null: not editing; 'new': adding a binding; otherwise the ID being edited.
+	let editingId = $state<string | null>(null);
 	let saving = $state(false);
 	let sourceId = $state('');
 	let required = $state(true);
@@ -140,7 +167,7 @@
 	let autoRedeploy = $state(false);
 	let infisicalTarget = $state<InfisicalTarget>(emptyInfisicalTarget());
 	let bitwardenTarget = $state<BitwardenTarget>(emptyBitwardenTarget());
-	// Vault/OpenBao, Doppler, 1Password, and HTTP targets.
+	// Vault/OpenBao, Doppler, 1Password, Proton Pass, and HTTP targets.
 	let genericTarget = $state<BindingTarget>({});
 
 	function emptyInfisicalTarget(): InfisicalTarget {
@@ -153,7 +180,7 @@
 
 	const draftProvider = $derived<SecretProvider | undefined>(sources.find((source) => source.id === sourceId)?.provider);
 
-	function startEditing() {
+	function startEditing(binding?: ProjectSecretBinding) {
 		sourceId = binding?.sourceId ?? (sources.length === 1 ? (sources[0]?.id ?? '') : '');
 		required = binding?.required ?? true;
 		enabled = binding?.enabled ?? true;
@@ -161,7 +188,7 @@
 		infisicalTarget = binding?.target.infisical ? { ...binding.target.infisical } : emptyInfisicalTarget();
 		bitwardenTarget = binding?.target.bitwarden ? { ...binding.target.bitwarden } : emptyBitwardenTarget();
 		genericTarget = binding ? structuredClone(binding.target) : {};
-		editing = true;
+		editingId = binding?.id ?? 'new';
 	}
 
 	function selectSource(value: string) {
@@ -179,19 +206,29 @@
 		return false;
 	});
 
-	// Shows the Infisical project name instead of its ID in the summary.
-	const boundProjectsQuery = createQuery(() => ({
-		queryKey: queryKeys.secretSources.browse(binding?.sourceId ?? '', 'projects'),
-		queryFn: () => secretSourceService.browse(binding?.sourceId ?? '', { kind: 'projects' }),
-		enabled: !editing && binding?.provider === 'infisical' && canListSources,
+	// Shows Infisical project names instead of IDs in the summaries.
+	const infisicalSourceIds = $derived([
+		...new Set(bindings.filter((binding) => binding.provider === 'infisical').map((binding) => binding.sourceId))
+	]);
+	const infisicalProjectsQuery = createQuery(() => ({
+		queryKey: ['secret-sources', 'infisical-project-names', ...infisicalSourceIds] as const,
+		queryFn: async () => {
+			const names = new Map<string, string>();
+			for (const id of infisicalSourceIds) {
+				const result = await tryCatch(secretSourceService.browse(id, { kind: 'projects' }));
+				for (const project of result.data ?? []) names.set(`${id}/${project.id}`, project.name);
+			}
+			return names;
+		},
+		enabled: editingId === null && infisicalSourceIds.length > 0 && canListSources,
 		retry: false
 	}));
 
 	function describeTarget(current: ProjectSecretBinding): string {
 		const infisical = current.target.infisical;
 		if (infisical) {
-			const projectName = boundProjectsQuery.data?.find((project) => project.id === infisical.projectId)?.name;
-			return `${projectName ?? infisical.projectId} · ${infisical.environment} · ${infisical.secretPath}`;
+			const name = infisicalProjectsQuery.data?.get(`${current.sourceId}/${infisical.projectId}`);
+			return `${name ?? infisical.projectId} · ${infisical.environment} · ${infisical.secretPath}`;
 		}
 		const bitwarden = current.target.bitwarden;
 		if (bitwarden) {
@@ -211,8 +248,8 @@
 		}
 	}
 
-	async function invalidateBinding() {
-		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.binding(environmentId, projectId) });
+	async function invalidateBindings() {
+		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.bindings(environmentId, projectId) });
 		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.list() });
 	}
 
@@ -223,74 +260,96 @@
 	}
 
 	async function save() {
-		if (!draftValid) return;
+		if (!draftValid || editingId === null) return;
+		const dto = { sourceId, target: targetForSave(), required, enabled, autoRedeploy };
+		const request =
+			editingId === 'new'
+				? secretSourceService.createBinding(environmentId, projectId, dto)
+				: secretSourceService.updateBinding(environmentId, projectId, editingId, dto);
 		await handleApiResultWithCallbacks({
-			result: await tryCatch(
-				secretSourceService.saveBinding(environmentId, projectId, {
-					sourceId,
-					target: targetForSave(),
-					required,
-					enabled,
-					autoRedeploy
-				})
-			),
+			result: await tryCatch(request),
 			message: m.project_secrets_save_failed(),
 			setLoadingState: (value) => (saving = value),
 			onSuccess: async () => {
 				toast.success(m.project_secrets_saved());
-				editing = false;
+				editingId = null;
 				checkResult = null;
-				await invalidateBinding();
+				await invalidateBindings();
 			}
 		});
 	}
 
-	function detach() {
+	let reordering = $state(false);
+
+	async function move(binding: ProjectSecretBinding, offset: number) {
+		const index = bindings.findIndex((candidate) => candidate.id === binding.id);
+		const position = index + offset;
+		if (index < 0 || position < 0 || position >= bindings.length) return;
+		await handleApiResultWithCallbacks({
+			result: await tryCatch(
+				secretSourceService.updateBinding(environmentId, projectId, binding.id, {
+					sourceId: binding.sourceId,
+					target: binding.target,
+					required: binding.required,
+					enabled: binding.enabled,
+					autoRedeploy: binding.autoRedeploy,
+					position
+				})
+			),
+			message: m.project_secrets_reorder_failed(),
+			setLoadingState: (value) => (reordering = value),
+			onSuccess: async () => {
+				toast.success(m.project_secrets_reordered());
+				checkResult = null;
+				await invalidateBindings();
+			}
+		});
+	}
+
+	function detach(binding: ProjectSecretBinding) {
 		confirmAndRun({
-			title: m.project_secrets_detach_title({ name: projectName }),
+			title: m.project_secrets_detach_one_title({ source: binding.sourceName, name: projectName }),
 			message: m.project_secrets_detach_message(),
 			confirmLabel: m.project_secrets_detach(),
 			destructive: true,
-			run: () => secretSourceService.deleteBinding(environmentId, projectId),
+			run: () => secretSourceService.deleteBinding(environmentId, projectId, binding.id),
 			failureMessage: m.common_action_failed(),
 			onSuccess: async () => {
 				toast.success(m.project_secrets_detached());
 				checkResult = null;
-				await invalidateBinding();
+				await invalidateBindings();
 			}
 		});
 	}
 
 	// ---- Check ----
 	let checking = $state(false);
-	let checkResult = $state<ProjectSecretCheckResult | null>(null);
+	let checkResult = $state<ProjectSecretsCheck | null>(null);
+	const checksById = $derived(new Map((checkResult?.bindings ?? []).map((check) => [check.bindingId, check])));
 
 	async function checkNow() {
 		await handleApiResultWithCallbacks({
-			result: await tryCatch(secretSourceService.checkBinding(environmentId, projectId)),
+			result: await tryCatch(secretSourceService.checkBindings(environmentId, projectId)),
 			message: m.project_secrets_check_failed(),
 			setLoadingState: (value) => (checking = value),
 			onSuccess: (result) => {
 				checkResult = result;
 			},
-			onError: async () => {
+			onError: () => {
 				checkResult = null;
-				await invalidateBinding();
 			}
 		});
-		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.binding(environmentId, projectId) });
+		await queryClient.invalidateQueries({ queryKey: queryKeys.secretSources.bindings(environmentId, projectId) });
 	}
-
-	const overridden = $derived(new Set(checkResult?.overriddenKeys ?? []));
 </script>
 
 {#if environmentId !== '0'}
 	<Alert.Root variant="info" icon={AlertIcon} heading={m.project_secrets_local_only()} />
-{:else if bindingQuery.isPending}
+{:else if bindingsQuery.isPending}
 	<div class="flex justify-center py-12"><Spinner /></div>
-{:else if editing}
+{:else if editingId !== null}
 	{@render editor()}
-{:else if !binding}
+{:else if bindings.length === 0}
 	<div class="rounded-xl border border-dashed border-border/70">
 		<Empty.Root>
 			<Empty.Header>
@@ -319,7 +378,7 @@
 									icon={ZapIcon}
 									customLabel={m.secret_setup_open()}
 									disabled={!canListSources}
-									onclick={openSetup}
+									onclick={() => openSetup()}
 								/>
 							{/if}
 							<ArcaneButton
@@ -328,7 +387,7 @@
 								icon={LockIcon}
 								customLabel={m.project_secrets_bind()}
 								disabled={!canListSources}
-								onclick={startEditing}
+								onclick={() => startEditing()}
 							/>
 						</div>
 					{/if}
@@ -337,7 +396,7 @@
 		</Empty.Root>
 	</div>
 {:else}
-	{@render summary(binding)}
+	{@render overview()}
 {/if}
 
 {#if setupSession > 0}
@@ -346,10 +405,10 @@
 			bind:open={setupOpen}
 			{environmentId}
 			{projectId}
-			sources={setupSources}
+			sources={setupChoices}
 			onDone={async () => {
 				checkResult = null;
-				await invalidateBinding();
+				await invalidateBindings();
 			}}
 			onAddToCompose={(keys) => {
 				setupOpen = false;
@@ -365,13 +424,76 @@
 	{/key}
 {/if}
 
-{#snippet summary(current: ProjectSecretBinding)}
+{#snippet overview()}
 	<div class="space-y-4">
-		<div class="flex flex-wrap items-center gap-4 rounded-xl border border-border/70 bg-card/60 p-4 backdrop-blur-md">
+		<div class="flex flex-wrap items-center gap-3">
+			<h3 class="text-base font-semibold">{m.project_secrets_sources_heading()}</h3>
+			<div class="flex flex-wrap items-center gap-1.5">
+				{#each bindings as binding (binding.id)}
+					<Badge variant={binding.enabled ? 'outline' : 'gray'} size="sm">
+						<ProviderIcon provider={binding.provider} class="size-4 rounded-sm p-0 ring-0" />
+						{binding.sourceName}
+					</Badge>
+				{/each}
+			</div>
+			{#if checkResult?.redeployNeeded}
+				<Badge variant="amber" size="sm"><AlertTriangleIcon class="size-3" />{m.project_secrets_redeploy_needed()}</Badge>
+			{/if}
+			<div class="ml-auto flex flex-wrap items-center gap-2">
+				{#if canCheck}
+					<ArcaneButton
+						action="refresh"
+						tone="outline-primary"
+						size="sm"
+						icon={RefreshIcon}
+						customLabel={m.project_secrets_check_now()}
+						loading={checking}
+						disabled={checking}
+						onclick={checkNow}
+					/>
+				{/if}
+				{#if canEdit}
+					<ArcaneButton
+						action="base"
+						tone="outline-primary"
+						size="sm"
+						icon={LockIcon}
+						customLabel={m.project_secrets_add_source()}
+						disabled={!canListSources}
+						onclick={() => startEditing()}
+					/>
+				{/if}
+			</div>
+		</div>
+
+		{#if bindings.length > 1}
+			<p class="text-xs text-muted-foreground">{m.project_secrets_order_hint()}</p>
+		{/if}
+
+		{#each bindings as binding, index (binding.id)}
+			{@render bindingCard(binding, index)}
+		{/each}
+
+		{#if !checkResult}
+			<p class="text-sm text-muted-foreground">{m.project_secrets_check_hint()}</p>
+		{/if}
+
+		<Alert.Root
+			variant="primary-subtle"
+			icon={LockIcon}
+			description={m.project_secrets_usage_hint({ example: 'environment: [DB_PASSWORD]' })}
+		/>
+	</div>
+{/snippet}
+
+{#snippet bindingCard(current: ProjectSecretBinding, index: number)}
+	{@const check = checksById.get(current.id)}
+	<div class="space-y-3 rounded-xl border border-border/70 bg-card/60 p-4 backdrop-blur-md">
+		<div class="flex flex-wrap items-center gap-4">
 			<ProviderIcon provider={current.provider} class="size-12 rounded-xl p-2.5" />
 			<div class="min-w-0 flex-1 space-y-1">
 				<div class="flex flex-wrap items-center gap-2">
-					<h3 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(current.provider) })}</h3>
+					<h4 class="text-base font-semibold">{m.project_secrets_title({ provider: providerLabel(current.provider) })}</h4>
 					{#if !current.enabled}
 						<Badge variant="gray" size="sm">{m.project_secrets_disabled()}</Badge>
 					{:else if current.required}
@@ -400,54 +522,73 @@
 					{/if}
 				</p>
 			</div>
-			<div class="flex items-center gap-2">
-				{#if canCheck}
+			<div class="flex flex-wrap items-center gap-2">
+				{#if canEdit && bindings.length > 1}
 					<ArcaneButton
-						action="refresh"
-						tone="outline-primary"
+						action="base"
+						tone="ghost"
 						size="sm"
-						icon={RefreshIcon}
-						customLabel={m.project_secrets_check_now()}
-						loading={checking}
-						disabled={checking}
-						onclick={checkNow}
+						icon={ArrowUpIcon}
+						customLabel={m.project_secrets_move_up()}
+						showLabel={false}
+						disabled={index === 0 || reordering}
+						onclick={() => void move(current, -1)}
+					/>
+					<ArcaneButton
+						action="base"
+						tone="ghost"
+						size="sm"
+						icon={ArrowDownIcon}
+						customLabel={m.project_secrets_move_down()}
+						showLabel={false}
+						disabled={index === bindings.length - 1 || reordering}
+						onclick={() => void move(current, 1)}
+					/>
+				{/if}
+				{#if canSetup && canMoveMoreInto(current)}
+					<ArcaneButton
+						action="base"
+						tone="outline"
+						size="sm"
+						icon={ZapIcon}
+						customLabel={m.secret_setup_open_again()}
+						disabled={!canListSources}
+						onclick={() => openSetup(current)}
 					/>
 				{/if}
 				{#if canEdit}
-					{#if canSetup && setupSources.length > 0 && providerCanSetUp(current.provider)}
-						<ArcaneButton
-							action="base"
-							tone="outline"
-							size="sm"
-							icon={ZapIcon}
-							customLabel={m.secret_setup_open_again()}
-							disabled={!canListSources}
-							onclick={openSetup}
-						/>
-					{/if}
 					<ArcaneButton
 						action="base"
 						tone="outline"
 						size="sm"
 						icon={VariableIcon}
 						customLabel={m.compose_refs_open()}
-						loading={composeRefsLoading}
-						disabled={composeRefsLoading}
-						onclick={() => void openComposeRefs()}
+						loading={composeRefsLoading === current.id}
+						disabled={composeRefsLoading !== null}
+						onclick={() => void openComposeRefs(undefined, current)}
 					/>
-					<ArcaneButton action="edit" tone="outline" size="sm" onclick={startEditing} disabled={!canListSources} />
+					<ArcaneButton action="edit" tone="outline" size="sm" onclick={() => startEditing(current)} disabled={!canListSources} />
+				{/if}
+				{#if canRemove}
 					<ArcaneButton
 						action="remove"
 						tone="outline-destructive"
 						size="sm"
 						customLabel={m.project_secrets_detach()}
-						onclick={detach}
+						onclick={() => detach(current)}
 					/>
 				{/if}
 			</div>
 		</div>
 
-		{#if current.lastFetchError}
+		{#if check?.error}
+			<Alert.Root
+				variant="destructive-subtle"
+				icon={AlertIcon}
+				heading={m.project_secrets_check_error()}
+				description={check.error}
+			/>
+		{:else if current.lastFetchError && !check}
 			<Alert.Root
 				variant="destructive-subtle"
 				icon={AlertIcon}
@@ -456,22 +597,17 @@
 			/>
 		{/if}
 
-		{#if checkResult && !current.lastFetchError}
-			{@render checkDetails(checkResult)}
-		{:else}
-			<p class="text-sm text-muted-foreground">{m.project_secrets_check_hint()}</p>
+		{#if check && !check.error}
+			{@render checkDetails(check, current)}
 		{/if}
-
-		<Alert.Root
-			variant="primary-subtle"
-			icon={LockIcon}
-			description={m.project_secrets_usage_hint({ example: 'environment: [DB_PASSWORD]' })}
-		/>
 	</div>
 {/snippet}
 
-{#snippet checkDetails(result: ProjectSecretCheckResult)}
-	<div class="space-y-3 rounded-xl border border-border/70 bg-card/60 p-4">
+{#snippet checkDetails(result: ProjectSecretCheckResult, current: ProjectSecretBinding)}
+	{@const overridden = new Set(result.overriddenKeys)}
+	{@const shadowed = new Set(result.shadowedKeys)}
+	{@const unused = new Set(result.unusedKeys)}
+	<div class="space-y-3 border-t border-border/50 pt-3">
 		<div class="flex flex-wrap items-center gap-2">
 			{#if result.neverDeployed}
 				<Badge variant="gray" size="sm">{m.project_secrets_never_deployed()}</Badge>
@@ -492,23 +628,45 @@
 			<div class="flex flex-wrap gap-1.5">
 				{#each result.keys as key (key)}
 					<Badge
-						variant={overridden.has(key) ? 'amber' : 'outline'}
+						variant={shadowed.has(key) ? 'gray' : unused.has(key) ? 'secondary' : overridden.has(key) ? 'amber' : 'outline'}
 						size="sm"
 						mono
-						title={overridden.has(key) ? m.project_secrets_overrides() : undefined}
+						title={shadowed.has(key)
+							? m.project_secrets_key_shadowed()
+							: unused.has(key)
+								? m.project_secrets_key_unused()
+								: overridden.has(key)
+									? m.project_secrets_overrides()
+									: undefined}
 					>
 						{key}
 					</Badge>
 				{/each}
 			</div>
-		{/if}
-
-		{#if result.keys.length === 0}
+		{:else}
 			<Alert.Root
 				variant="destructive-subtle"
 				icon={AlertIcon}
 				heading={m.project_secrets_empty_title()}
-				description={binding?.required ? m.project_secrets_empty_required() : m.project_secrets_empty_optional()}
+				description={current.required ? m.project_secrets_empty_required() : m.project_secrets_empty_optional()}
+			/>
+		{/if}
+
+		{#if result.shadowedKeys.length > 0}
+			<Alert.Root
+				variant="info"
+				icon={AlertIcon}
+				heading={m.project_secrets_shadowed()}
+				description={`${m.project_secrets_shadowed_description()} ${result.shadowedKeys.join(', ')}`}
+			/>
+		{/if}
+
+		{#if result.unusedKeys.length > 0}
+			<Alert.Root
+				variant="info"
+				icon={VariableIcon}
+				heading={m.project_secrets_unused()}
+				description={`${m.project_secrets_unused_description()} ${result.unusedKeys.join(', ')}`}
 			/>
 		{/if}
 
@@ -600,7 +758,7 @@
 		</div>
 
 		<div class="flex gap-2">
-			<ArcaneButton action="cancel" tone="outline" type="button" onclick={() => (editing = false)} disabled={saving} />
+			<ArcaneButton action="cancel" tone="outline" type="button" onclick={() => (editingId = null)} disabled={saving} />
 			<ArcaneButton action="save" type="submit" loading={saving} disabled={saving || !draftValid} />
 		</div>
 	</form>
