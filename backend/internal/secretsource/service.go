@@ -191,6 +191,7 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	}
 	beforeFingerprint := connectionFingerprintInternal(source)
 	beforeSetupClientID := setupClientIDInternal(source.Settings)
+	beforeEndpoint := endpointKeyInternal(source.Settings)
 
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
@@ -209,7 +210,21 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 		}
 		source.Settings = settings
 	}
-	if req.Credential != nil && *req.Credential != "" && providerAcceptsCredentialInternal(source.Provider) {
+	newCredential := req.Credential != nil && *req.Credential != ""
+	if req.ClearCredential {
+		if source.Provider != secretsourcetypes.ProviderHTTP {
+			return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("only an HTTP source's token can be removed"))
+		}
+		source.Credential = ""
+	}
+	// A stored credential only goes to the address it was saved for. When the
+	// address or login method changes, it has to be entered again.
+	endpointChanged := endpointKeyInternal(source.Settings) != beforeEndpoint
+	if endpointChanged && source.Credential != "" && !newCredential && !req.ClearCredential {
+		return nil, common.Classify(common.ErrSecretSourceInvalid,
+			errors.New("the address or login method changed; enter "+credentialLabelInternal(source.Provider)+" again"))
+	}
+	if newCredential && providerAcceptsCredentialInternal(source.Provider) {
 		encrypted, encryptErr := crypto.Encrypt(*req.Credential)
 		if encryptErr != nil {
 			return nil, fmt.Errorf("failed to encrypt credential: %w", encryptErr)
@@ -219,6 +234,9 @@ func (s *SecretSourceService) UpdateSource(ctx context.Context, id string, req s
 	setupSecret := ""
 	if req.SetupCredential != nil {
 		setupSecret = *req.SetupCredential
+	}
+	if endpointChanged && source.SetupCredential != "" && setupSecret == "" && setupClientIDInternal(source.Settings) != "" {
+		return nil, common.Classify(common.ErrSecretSourceInvalid, errors.New("the address changed; enter the setup identity's secret again"))
 	}
 	if setupErr := applySetupCredentialInternal(source, beforeSetupClientID, setupSecret); setupErr != nil {
 		return nil, setupErr
@@ -282,7 +300,8 @@ func (s *SecretSourceService) TestSource(ctx context.Context, req secretsourcety
 		if decryptErr != nil {
 			return secretsourcetypes.TestSourceResult{}, decryptErr
 		}
-		if credential == "" {
+		// The stored credential is only sent to the address it was saved for.
+		if credential == "" && endpointKeyInternal(settings) == endpointKeyInternal(stored.Settings) {
 			credential = storedCredential
 		}
 		candidate := *stored
@@ -783,6 +802,28 @@ func providerNeedsCredentialInternal(providerName string) bool {
 // optional. Bitwarden's session lives in bw serve.
 func providerAcceptsCredentialInternal(providerName string) bool {
 	return providerNeedsCredentialInternal(providerName) || providerName == secretsourcetypes.ProviderHTTP
+}
+
+// endpointKeyInternal identifies where a source's credential is sent and how
+// it is used: the server address and, for Vault, the login method.
+func endpointKeyInternal(settings secretsourcetypes.SourceSettings) string {
+	switch {
+	case settings.Infisical != nil:
+		return "infisical\x00" + settings.Infisical.SiteURL
+	case settings.Vault != nil:
+		v := settings.Vault
+		return "vault\x00" + v.Address + "\x00" + v.AuthMethod + "\x00" + v.RoleID + "\x00" + v.AppRoleMount
+	case settings.Doppler != nil:
+		return "doppler\x00" + settings.Doppler.APIURL
+	case settings.OnePassword != nil:
+		return "onepassword\x00" + settings.OnePassword.ServerURL
+	case settings.HTTP != nil:
+		return "http\x00" + settings.HTTP.BaseURL
+	case settings.Bitwarden != nil:
+		return "bitwarden\x00" + settings.Bitwarden.ServeURL
+	default:
+		return ""
+	}
 }
 
 func credentialLabelInternal(providerName string) string {

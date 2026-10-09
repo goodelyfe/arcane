@@ -144,3 +144,45 @@ func TestNewClientValidates(t *testing.T) {
 	_, err = NewClient(nil, Config{Address: "http://x", AuthMethod: "ldap", Secret: "s"})
 	assert.ErrorContains(t, err, "unknown auth method")
 }
+
+func TestAppRoleLogsInAgainAfterRevokedToken(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/auth/approle/login", func(w http.ResponseWriter, _ *http.Request) {
+		n := logins.Add(1)
+		_, _ = w.Write([]byte(`{"auth":{"client_token":"t` + string(rune('0'+n)) + `","lease_duration":3600}}`))
+	})
+	mux.HandleFunc("GET /v1/auth/token/lookup-self", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") == "t1" {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"errors":["permission denied"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"display_name":"approle"}}`))
+	})
+	client, err := NewClient(nil, Config{Address: newServerInternal(t, mux), AuthMethod: AuthAppRole, RoleID: "r", Secret: "s"})
+	require.NoError(t, err)
+
+	_, err = client.LookupSelf(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), logins.Load())
+}
+
+func TestShortLeaseIsStillCached(t *testing.T) {
+	var logins atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/auth/approle/login", func(w http.ResponseWriter, _ *http.Request) {
+		logins.Add(1)
+		_, _ = w.Write([]byte(`{"auth":{"client_token":"t","lease_duration":20}}`))
+	})
+	mux.HandleFunc("GET /v1/auth/token/lookup-self", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	})
+	client, err := NewClient(nil, Config{Address: newServerInternal(t, mux), AuthMethod: AuthAppRole, RoleID: "r", Secret: "s"})
+	require.NoError(t, err)
+	for range 3 {
+		_, err = client.LookupSelf(t.Context())
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(1), logins.Load())
+}
