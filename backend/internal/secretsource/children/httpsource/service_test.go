@@ -42,6 +42,15 @@ func TestTestAndFetch(t *testing.T) {
 	assert.True(t, result.OK)
 	assert.Contains(t, result.Message, "set a path")
 
+	// A directory listing at the root (python -m http.server) is reachable too.
+	listing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`<html><body>web</body></html>`))
+	}))
+	t.Cleanup(listing.Close)
+	html, err := New(listing.Client(), secretsourcetypes.HTTPSettings{BaseURL: listing.URL}, "")
+	require.NoError(t, err)
+	assert.True(t, html.Test(t.Context()).OK)
+
 	values, skipped, err := provider.Fetch(t.Context(), secretsourcetypes.BindingTarget{HTTP: &secretsourcetypes.HTTPTarget{Path: "secrets/web"}})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"A": "1"}, values)

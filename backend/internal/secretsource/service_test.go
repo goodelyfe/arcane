@@ -524,3 +524,51 @@ func TestBitwardenSourceFolderAndItemBindings(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"API_KEY": "k", "DEBUG": "true"}, env.Values)
 }
+
+func TestStoredCredentialOnlyGoesToItsOwnAddress(t *testing.T) {
+	service, _ := setupSecretSourceServiceTestInternal(t)
+
+	var seen []string
+	capture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{"A":"1"}`))
+	}))
+	t.Cleanup(capture.Close)
+
+	source, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "kit", Provider: secretsourcetypes.ProviderHTTP, Credential: "stored-token",
+		Settings: secretsourcetypes.SourceSettings{HTTP: &secretsourcetypes.HTTPSettings{BaseURL: "http://sops-kit:8080"}},
+	})
+	require.NoError(t, err)
+
+	// Testing an edited address with a blank credential must not send the stored token there.
+	moved := secretsourcetypes.SourceSettings{HTTP: &secretsourcetypes.HTTPSettings{BaseURL: capture.URL}}
+	result, err := service.TestSource(t.Context(), secretsourcetypes.TestSourceRequest{SourceID: source.ID, Settings: moved})
+	require.NoError(t, err)
+	assert.True(t, result.OK)
+	require.Len(t, seen, 1)
+	assert.Empty(t, seen[0])
+
+	// Saving the new address needs the token again, or an explicit removal.
+	_, err = service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Settings: &moved})
+	require.ErrorIs(t, err, common.ErrValidation)
+	updated, err := service.UpdateSource(t.Context(), source.ID, secretsourcetypes.UpdateSourceRequest{Settings: &moved, ClearCredential: true})
+	require.NoError(t, err)
+	assert.False(t, updated.HasCredential)
+
+	// Vault: switching from token to AppRole must not reuse the token as a secret ID.
+	bao, err := service.CreateSource(t.Context(), secretsourcetypes.CreateSourceRequest{
+		Name: "bao", Provider: secretsourcetypes.ProviderVault, Credential: "token",
+		Settings: secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200"}},
+	})
+	require.NoError(t, err)
+	approle := secretsourcetypes.SourceSettings{Vault: &secretsourcetypes.VaultSettings{Address: "http://openbao:8200", AuthMethod: "approle", RoleID: "r"}}
+	_, err = service.UpdateSource(t.Context(), bao.ID, secretsourcetypes.UpdateSourceRequest{Settings: &approle})
+	require.ErrorIs(t, err, common.ErrValidation)
+	_, err = service.UpdateSource(t.Context(), bao.ID, secretsourcetypes.UpdateSourceRequest{Settings: &approle, Credential: new("secret-id")})
+	require.NoError(t, err)
+
+	// Only HTTP tokens can be removed.
+	_, err = service.UpdateSource(t.Context(), bao.ID, secretsourcetypes.UpdateSourceRequest{ClearCredential: true})
+	require.ErrorIs(t, err, common.ErrValidation)
+}
