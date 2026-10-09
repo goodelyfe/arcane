@@ -91,6 +91,12 @@
 		enabled: provider === 'doppler' && !!sourceId,
 		retry: false
 	}));
+	// A service token cannot list projects: it is scoped to one config, which
+	// the empty target {} stands for.
+	$effect(() => {
+		if (provider !== 'doppler' || !dopplerProjectsQuery.isError || !target.doppler) return;
+		if (target.doppler.project !== undefined || target.doppler.config !== undefined) target.doppler = {};
+	});
 	const dopplerConfigsQuery = createQuery(() => ({
 		queryKey: queryKeys.secretSources.browse(sourceId, 'configs', target.doppler?.project ?? ''),
 		queryFn: () => secretSourceService.browse(sourceId, { kind: 'configs', projectId: target.doppler?.project }),

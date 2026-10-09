@@ -145,6 +145,9 @@ type UpdateSourceRequest struct {
 	Settings        *SourceSettings `json:"settings,omitzero"`
 	Credential      *string         `json:"credential,omitzero"`
 	SetupCredential *string         `json:"setupCredential,omitzero"`
+	// ClearCredential removes the stored credential. Only HTTP sources,
+	// whose bearer token is optional, accept it.
+	ClearCredential bool `json:"clearCredential,omitempty"`
 }
 
 // TestSourceRequest tests settings without saving them. When SourceID is set

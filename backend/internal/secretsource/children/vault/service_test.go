@@ -24,6 +24,10 @@ func TestNormalizeTargetDefaultsAndRejectsTraversal(t *testing.T) {
 		{Path: "apps//x"},
 		{Mount: "..", Path: "x"},
 		{Path: "x", KVVersion: 3},
+		{Mount: "auth", Path: "token/lookup-self", KVVersion: 1},
+		{Mount: "sys", Path: "internal/ui/mounts"},
+		{Mount: "Identity/x", Path: "y"},
+		{Mount: "cubbyhole", Path: "x"},
 	} {
 		_, err := NormalizeTarget(&bad)
 		assert.Error(t, err, bad)
@@ -34,6 +38,10 @@ func TestNormalizeSettings(t *testing.T) {
 	settings, err := NormalizeSettings(&secretsourcetypes.VaultSettings{Address: "http://openbao:8200/", Namespace: "/team/"})
 	require.NoError(t, err)
 	assert.Equal(t, &secretsourcetypes.VaultSettings{Address: "http://openbao:8200", Namespace: "team", AuthMethod: "token"}, settings)
+
+	settings, err = NormalizeSettings(&secretsourcetypes.VaultSettings{Address: "http://v:8200", SetupToken: true})
+	require.NoError(t, err)
+	assert.True(t, settings.SetupToken, "the setup token flag must survive normalization")
 
 	settings, err = NormalizeSettings(&secretsourcetypes.VaultSettings{Address: "http://v:8200", AuthMethod: "approle", RoleID: "r"})
 	require.NoError(t, err)
@@ -129,4 +137,70 @@ func TestSetupNeedsSetupToken(t *testing.T) {
 func TestSuggestPath(t *testing.T) {
 	assert.Equal(t, "arcane/my-app", SuggestPath("My App!"))
 	assert.Equal(t, "arcane/project", SuggestPath("!!!"))
+}
+
+func TestBrowseRefusesSystemMounts(t *testing.T) {
+	provider, err := New(nil, secretsourcetypes.VaultSettings{Address: "http://127.0.0.1:1", AuthMethod: "token"}, "t")
+	require.NoError(t, err)
+	_, err = provider.Browse(t.Context(), secretsourcetypes.BrowseQuery{Kind: secretsourcetypes.BrowseVaultPaths, Mount: "auth", Path: "token"})
+	assert.ErrorContains(t, err, "system path")
+	_, err = provider.Browse(t.Context(), secretsourcetypes.BrowseQuery{Kind: secretsourcetypes.BrowseVaultPaths, Mount: "secret", Path: "a/../../sys"})
+	assert.ErrorContains(t, err, "invalid path")
+}
+
+func TestSetupKeepsNumbersAndHandlesSoftDeletedSecret(t *testing.T) {
+	var writes []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/secret/data/arcane/web", func(w http.ResponseWriter, _ *http.Request) {
+		// The latest version is soft-deleted: 404 with metadata only.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"data":{"data":null,"metadata":{"version":7,"deletion_time":"2026-01-01T00:00:00Z"}}}`))
+	})
+	mux.HandleFunc("GET /v1/secret/metadata/arcane/web", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"current_version":7}}`))
+	})
+	mux.HandleFunc("POST /v1/secret/data/arcane/web", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		writes = append(writes, string(raw))
+		_, _ = w.Write([]byte(`{"data":{"version":8}}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	setup, err := NewSetup(server.Client(), secretsourcetypes.VaultSettings{Address: server.URL, SetupToken: true}, "setup-token")
+	require.NoError(t, err)
+	target, err := NormalizeSetupTarget(secretsourcetypes.SetupTarget{Mode: secretsourcetypes.SetupModeKVPath}, "web")
+	require.NoError(t, err)
+
+	remote, err := setup.RemoteValues(t.Context(), target)
+	require.NoError(t, err)
+	assert.Empty(t, remote)
+	require.NoError(t, setup.Write(t.Context(), target, map[string]string{"A": "1"}, []string{"A"}, nil))
+	require.Len(t, writes, 1)
+	assert.JSONEq(t, `{"data":{"A":"1"},"options":{"cas":7}}`, writes[0])
+}
+
+func TestSetupWritesExistingValuesBackUnchanged(t *testing.T) {
+	var written string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/secret/data/arcane/web", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"data":{"BIG":12345678901234567890,"OBJ":{"a":[1,2]}},"metadata":{"version":1}}}`))
+	})
+	mux.HandleFunc("POST /v1/secret/data/arcane/web", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		written = string(raw)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	setup, err := NewSetup(server.Client(), secretsourcetypes.VaultSettings{Address: server.URL, SetupToken: true}, "s")
+	require.NoError(t, err)
+	target, err := NormalizeSetupTarget(secretsourcetypes.SetupTarget{Mode: secretsourcetypes.SetupModeKVPath}, "web")
+	require.NoError(t, err)
+	_, err = setup.RemoteValues(t.Context(), target)
+	require.NoError(t, err)
+	require.NoError(t, setup.Write(t.Context(), target, map[string]string{"NEW": "n"}, []string{"NEW"}, nil))
+	assert.Contains(t, written, `"BIG":12345678901234567890`)
+	assert.Contains(t, written, `"OBJ":{"a":[1,2]}`)
 }

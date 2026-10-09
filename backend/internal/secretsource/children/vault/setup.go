@@ -3,7 +3,6 @@ package vault
 import (
 	"context"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -68,6 +67,7 @@ func NormalizeSetupTarget(target secretsourcetypes.SetupTarget, arcaneProjectNam
 	if path == "" || path == "/" {
 		path = SuggestPath(arcaneProjectName)
 	}
+	// NormalizeTarget also refuses system mounts such as sys and auth.
 	bindingTarget, err := NormalizeTarget(&secretsourcetypes.VaultTarget{Mount: target.Mount, Path: path, KVVersion: target.KVVersion})
 	if err != nil {
 		return secretsourcetypes.SetupTarget{}, err
@@ -90,7 +90,13 @@ func BindingTarget(target secretsourcetypes.SetupTarget) *secretsourcetypes.Vaul
 func (s *Setup) RemoteValues(ctx context.Context, target secretsourcetypes.SetupTarget) (map[string]string, error) {
 	data, version, err := s.client.Read(ctx, target.Mount, target.KVVersion, target.SecretPath)
 	if vault.IsNotFound(err) {
-		data, version, err = map[string]jsontext.Value{}, 0, nil
+		// A soft-deleted secret answers 404 but keeps its version, which
+		// check-and-set must match.
+		data, err = map[string]jsontext.Value{}, nil
+		version = 0
+		if target.KVVersion == 2 {
+			version, err = s.client.CurrentVersion(ctx, target.Mount, target.SecretPath)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -118,13 +124,11 @@ func (s *Setup) Write(ctx context.Context, target secretsourcetypes.SetupTarget,
 			return err
 		}
 	}
+	// Existing keys are written back byte for byte, so numbers and nested
+	// values are kept exactly.
 	merged := make(map[string]any, len(s.current)+len(create))
 	for key, raw := range s.current {
-		var decoded any
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			return fmt.Errorf("keep existing key %s: %w", key, err)
-		}
-		merged[key] = decoded
+		merged[key] = raw
 	}
 	for _, key := range create {
 		if _, exists := s.current[key]; exists {

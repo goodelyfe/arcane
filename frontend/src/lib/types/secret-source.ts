@@ -74,6 +74,7 @@ export interface SecretSourceUpdateDto {
 	settings?: SourceSettings;
 	credential?: string; // omitted or empty = keep stored credential
 	setupCredential?: string; // omitted or empty = keep stored setup credential
+	clearCredential?: boolean; // HTTP sources only: remove the stored bearer token
 }
 
 export interface SecretSourceTestDto {

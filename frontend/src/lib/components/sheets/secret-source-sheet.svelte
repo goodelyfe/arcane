@@ -5,7 +5,7 @@
 	import { ArcaneButton } from '#lib/components/arcane-button/index.js';
 	import FormInput from '#lib/components/form/form-input.svelte';
 	import SwitchWithLabel from '#lib/components/form/labeled-switch.svelte';
-	import { providerOptions } from '#lib/components/secret-sources/providers.js';
+	import { endpointKey, providerOptions } from '#lib/components/secret-sources/providers.js';
 	import SheetFooterActions from '#lib/components/sheets/sheet-footer-actions.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Label } from '#lib/components/ui/label/index.js';
@@ -57,6 +57,11 @@
 	let vaultSetupToken = $state(!!storedVault?.setupToken);
 	const storedVaultSetupToken = !!storedVault?.setupToken && untrack(() => !!sourceToEdit?.hasSetupCredential);
 
+	// A stored credential is only reused while the address and login method
+	// stay the same; the backend refuses otherwise.
+	const storedEndpoint = untrack(() => (sourceToEdit ? endpointKey(sourceToEdit.settings) : ''));
+	let clearHttpToken = $state(false);
+
 	// Everything except Bitwarden stores a credential; for HTTP it is optional.
 	const usesCredential = $derived(provider !== 'bitwarden');
 	const credentialRequired = $derived(provider !== 'bitwarden' && provider !== 'http');
@@ -100,10 +105,15 @@
 				const requireField = (field: 'serveUrl' | 'address' | 'serverUrl' | 'baseUrl' | 'roleId', message: string) => {
 					if (!data[field]) ctx.addIssue({ code: 'custom', path: [field], message });
 				};
-				// Editing keeps the stored credential when the field is left empty.
+				// Editing keeps the stored credential when the field is left empty,
+				// unless the address or login method changed.
+				const endpointChanged = !!sourceToEdit && endpointKey(currentSettings()) !== storedEndpoint;
 				const requireCredential = () => {
-					if (!sourceToEdit && data.clientSecret === '') {
+					if (data.clientSecret !== '') return;
+					if (!sourceToEdit) {
 						ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_required() });
+					} else if (endpointChanged && hasStoredSecret) {
+						ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_reenter() });
 					}
 				};
 				switch (provider) {
@@ -127,6 +137,9 @@
 						return;
 					case 'http':
 						requireField('baseUrl', m.secret_sources_url_required());
+						if (endpointChanged && hasStoredSecret && !clearHttpToken && data.clientSecret === '') {
+							ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_reenter() });
+						}
 						return;
 				}
 				if (!data.clientId) {
@@ -135,6 +148,9 @@
 				// Editing keeps the stored secret when the field is left empty.
 				if (!sourceToEdit && data.clientSecret === '') {
 					ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_client_secret_required() });
+				}
+				if (endpointChanged && hasStoredSecret && data.clientSecret === '') {
+					ctx.addIssue({ code: 'custom', path: ['clientSecret'], message: m.secret_sources_credential_reenter() });
 				}
 				if (data.setupClientId && data.setupClientId === data.clientId) {
 					ctx.addIssue({ code: 'custom', path: ['setupClientId'], message: m.secret_sources_setup_same_identity() });
@@ -227,7 +243,8 @@
 			input.error = message;
 			return true;
 		};
-		const missingCredential = () => !inputs.clientSecret.value && !hasStoredSecret && credentialRequired;
+		const endpointChanged = !!sourceToEdit && endpointKey(currentSettings()) !== storedEndpoint;
+		const missingCredential = () => !inputs.clientSecret.value && credentialRequired && (!hasStoredSecret || endpointChanged);
 		if (provider === 'bitwarden') {
 			if (missing(inputs.serveUrl, m.secret_sources_serve_url_required())) return;
 		} else if (provider !== 'infisical') {
@@ -241,7 +258,9 @@
 							: null;
 			if (urlInput && missing(urlInput, m.secret_sources_url_required())) return;
 			if (missingCredential()) {
-				inputs.clientSecret.error = m.secret_sources_credential_required();
+				inputs.clientSecret.error = endpointChanged
+					? m.secret_sources_credential_reenter()
+					: m.secret_sources_credential_required();
 				return;
 			}
 		} else {
@@ -281,7 +300,12 @@
 		if (provider === 'vault' && vaultSetupToken && data.setupToken) setupCredential = data.setupToken;
 
 		if (isEditMode && sourceToEdit) {
-			onSubmit({ mode: 'edit', id: sourceToEdit.id, source: { name: data.name, settings, credential, setupCredential } });
+			const clearCredential = provider === 'http' && clearHttpToken && !credential ? true : undefined;
+			onSubmit({
+				mode: 'edit',
+				id: sourceToEdit.id,
+				source: { name: data.name, settings, credential, setupCredential, clearCredential }
+			});
 			return;
 		}
 		onSubmit({ mode: 'create', source: { name: data.name, provider, settings, credential, setupCredential } });
@@ -447,6 +471,14 @@
 					helpText={m.http_bearer_token_description()}
 					bind:input={inputs.clientSecret}
 				/>
+				{#if isEditMode && hasStoredSecret}
+					<SwitchWithLabel
+						id="http-clear-token"
+						label={m.http_remove_token()}
+						description={m.http_remove_token_description()}
+						bind:checked={clearHttpToken}
+					/>
+				{/if}
 				<Alert.Root variant="info" icon={AlertIcon} description={m.http_contract_hint({ example: '{"DB_PASSWORD": "…"}' })} />
 			{:else}
 				<FormInput

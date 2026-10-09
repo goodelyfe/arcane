@@ -72,12 +72,13 @@ func New(httpClient *http.Client, settings secretsourcetypes.HTTPSettings, token
 	return &Provider{client: client}, nil
 }
 
-// Test reads the base URL. Endpoints that only answer on sub-paths may
-// return 404 there, which still proves they are reachable.
+// Test reads the base URL. Endpoints that only serve secrets on sub-paths
+// may answer 404 or something other than JSON there (a directory listing),
+// which still proves they are reachable.
 func (p *Provider) Test(ctx context.Context) secretsourcetypes.TestSourceResult {
 	object, err := p.client.Get(ctx, "")
 	switch {
-	case secretapi.IsNotFound(err):
+	case secretapi.IsNotFound(err), errors.Is(err, secretapi.ErrUnexpectedShape):
 		return secretsourcetypes.TestSourceResult{OK: true, Message: "The endpoint answers; its root has no secrets, so set a path when binding"}
 	case err != nil:
 		return secretsourcetypes.TestSourceResult{OK: false, Message: err.Error()}

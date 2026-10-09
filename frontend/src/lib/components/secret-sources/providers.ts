@@ -1,5 +1,5 @@
 import { m } from '#lib/paraglide/messages.js';
-import type { BindingTarget, SecretProvider } from '#lib/types/secret-source.js';
+import type { BindingTarget, SecretProvider, SourceSettings } from '#lib/types/secret-source.js';
 
 // Provider metadata shared by the source sheet, the binding forms, and the
 // summaries. Infisical and Bitwarden keep their own target components; the
@@ -62,9 +62,13 @@ export function isGenericTargetComplete(provider: GenericProvider, target: Bindi
 			const path = target.vault?.path.trim() ?? '';
 			return !!path && !path.endsWith('/');
 		}
-		case 'doppler':
-			// Both empty (service token) or both set.
-			return !!target.doppler && !!target.doppler.project?.trim() === !!target.doppler.config?.trim();
+		case 'doppler': {
+			// {} is a service token's own config; otherwise both must be picked.
+			const doppler = target.doppler;
+			if (!doppler) return false;
+			if (doppler.project === undefined && doppler.config === undefined) return true;
+			return !!doppler.project?.trim() && !!doppler.config?.trim();
+		}
 		case 'onepassword': {
 			const op = target.onepassword;
 			return !!op?.vaultId && (op.scope === 'vault' || !!op.itemId);
@@ -77,6 +81,20 @@ export function isGenericTargetComplete(provider: GenericProvider, target: Bindi
 // Keeps only the selected provider's target, as the API expects.
 export function pickGenericTarget(provider: GenericProvider, target: BindingTarget): BindingTarget {
 	return withDefaultTarget(provider, target);
+}
+
+// Where a source's credential is sent; the backend asks for the credential
+// again when this changes.
+export function endpointKey(settings: SourceSettings): string {
+	if (settings.infisical) return `infisical|${settings.infisical.siteUrl}`;
+	if (settings.vault) {
+		const vault = settings.vault;
+		return `vault|${vault.address}|${vault.authMethod}|${vault.roleId ?? ''}|${vault.appRoleMount ?? ''}`;
+	}
+	if (settings.doppler) return `doppler|${settings.doppler.apiUrl ?? ''}`;
+	if (settings.onepassword) return `onepassword|${settings.onepassword.serverUrl}`;
+	if (settings.http) return `http|${settings.http.baseUrl}`;
+	return '';
 }
 
 export function describeGenericTarget(target: BindingTarget): string {

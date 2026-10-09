@@ -154,9 +154,30 @@ func (c *Client) tokenInternal(ctx context.Context) (string, error) {
 	c.token = resp.Auth.ClientToken
 	c.expiresAt = time.Time{}
 	if resp.Auth.LeaseDuration > 0 {
-		c.expiresAt = time.Now().Add(time.Duration(resp.Auth.LeaseDuration)*time.Second - tokenRefreshMargin)
+		lease := time.Duration(resp.Auth.LeaseDuration) * time.Second
+		// Renew a little early, but never use up more than half a short lease.
+		c.expiresAt = time.Now().Add(lease - min(tokenRefreshMargin, lease/2))
 	}
 	return c.token, nil
+}
+
+// forgetTokenInternal drops a cached AppRole token, so the next request logs
+// in again.
+func (c *Client) forgetTokenInternal() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = ""
+}
+
+// doInternal sends one request. With AppRole, a 401/403 may mean the cached
+// token was revoked or expired early, so it logs in again and retries once.
+func (c *Client) doInternal(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	err := c.api.Do(ctx, method, path, query, body, out)
+	if err != nil && c.config.AuthMethod == AuthAppRole && secretapi.IsUnauthorized(err) {
+		c.forgetTokenInternal()
+		err = c.api.Do(ctx, method, path, query, body, out)
+	}
+	return err
 }
 
 // LookupSelf describes the token, which also proves it works.
@@ -164,7 +185,7 @@ func (c *Client) LookupSelf(ctx context.Context) (*TokenInfo, error) {
 	var resp struct {
 		Data TokenInfo `json:"data"`
 	}
-	if err := c.api.Do(ctx, http.MethodGet, "/v1/auth/token/lookup-self", nil, nil, &resp); err != nil {
+	if err := c.doInternal(ctx, http.MethodGet, "/v1/auth/token/lookup-self", nil, nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Data, nil
@@ -181,7 +202,7 @@ func (c *Client) KVMounts(ctx context.Context) ([]Mount, error) {
 			} `json:"secret"`
 		} `json:"data"`
 	}
-	if err := c.api.Do(ctx, http.MethodGet, "/v1/sys/internal/ui/mounts", nil, nil, &resp); err != nil {
+	if err := c.doInternal(ctx, http.MethodGet, "/v1/sys/internal/ui/mounts", nil, nil, &resp); err != nil {
 		return nil, err
 	}
 	mounts := []Mount{}
@@ -206,7 +227,7 @@ func (c *Client) List(ctx context.Context, mount string, kvVersion int, path str
 		} `json:"data"`
 	}
 	endpoint := kvPathInternal(mount, kvVersion, "metadata", path) + "/"
-	err := c.api.Do(ctx, http.MethodGet, endpoint, url.Values{"list": {"true"}}, nil, &resp)
+	err := c.doInternal(ctx, http.MethodGet, endpoint, url.Values{"list": {"true"}}, nil, &resp)
 	if secretapi.IsNotFound(err) {
 		return []string{}, nil
 	}
@@ -229,7 +250,7 @@ func (c *Client) Read(ctx context.Context, mount string, kvVersion int, path str
 				} `json:"metadata"`
 			} `json:"data"`
 		}
-		if err := c.api.Do(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
+		if err := c.doInternal(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
 			return nil, 0, err
 		}
 		if resp.Data == nil || resp.Data.Data == nil {
@@ -241,10 +262,28 @@ func (c *Client) Read(ctx context.Context, mount string, kvVersion int, path str
 	var resp struct {
 		Data map[string]jsontext.Value `json:"data"`
 	}
-	if err := c.api.Do(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
+	if err := c.doInternal(ctx, http.MethodGet, endpoint, nil, nil, &resp); err != nil {
 		return nil, 0, err
 	}
 	return resp.Data, 0, nil
+}
+
+// CurrentVersion returns the latest version number of a KV v2 secret, even
+// when that version is soft-deleted, or 0 when the secret does not exist.
+func (c *Client) CurrentVersion(ctx context.Context, mount, path string) (int, error) {
+	var resp struct {
+		Data struct {
+			CurrentVersion int `json:"current_version"`
+		} `json:"data"`
+	}
+	err := c.doInternal(ctx, http.MethodGet, kvPathInternal(mount, 2, "metadata", path), nil, nil, &resp)
+	if secretapi.IsNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return resp.Data.CurrentVersion, nil
 }
 
 // Write stores data at path, replacing what is there. For KV version 2, cas
@@ -257,9 +296,9 @@ func (c *Client) Write(ctx context.Context, mount string, kvVersion int, path st
 		if cas >= 0 {
 			body["options"] = map[string]int{"cas": cas}
 		}
-		return c.api.Do(ctx, http.MethodPost, endpoint, nil, body, nil)
+		return c.doInternal(ctx, http.MethodPost, endpoint, nil, body, nil)
 	}
-	return c.api.Do(ctx, http.MethodPost, endpoint, nil, data, nil)
+	return c.doInternal(ctx, http.MethodPost, endpoint, nil, data, nil)
 }
 
 // IsNotFound reports whether err means the path does not exist.
