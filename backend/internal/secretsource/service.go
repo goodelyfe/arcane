@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -32,6 +33,7 @@ import (
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/infisical"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/onepassword"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/protonpass"
+	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/setupplan"
 	"github.com/getarcaneapp/arcane/backend/v2/internal/secretsource/children/vault"
 	"github.com/getarcaneapp/arcane/backend/v2/pkg/projects"
 )
@@ -834,8 +836,15 @@ func overriddenKeysInternal(ctx context.Context, project ProjectRef, keys []stri
 			slog.DebugContext(ctx, "could not read env file for override check", "path", path, "error", err)
 			continue
 		}
+		// KEY=${KEY} passes the secret on rather than setting its own value.
+		var placeholders map[string]struct{}
+		if content, readErr := os.ReadFile(path); readErr == nil {
+			placeholders = setupplan.SelfReferencedKeys(string(content))
+		}
 		for key := range values {
-			defined[key] = struct{}{}
+			if _, placeholder := placeholders[key]; !placeholder {
+				defined[key] = struct{}{}
+			}
 		}
 	}
 
