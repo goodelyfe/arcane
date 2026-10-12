@@ -483,7 +483,7 @@ func TestCheckBindingReportsOverridesAndDrift(t *testing.T) {
 	bindInfisicalInternal(t, service, source.ID, true, false)
 
 	projectDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DB_PASS=local\nOTHER=1\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("DB_PASS=local\nOTHER=1\n# A placeholder passes the secret on and is not an override.\nAPI_KEY=${API_KEY}\n"), 0o600))
 	project := ProjectRef{ID: "project-1", Name: "billing-api", Path: projectDir}
 
 	result, err := checkFirstBindingForTestInternal(t.Context(), service, project, usertypes.Actor{})

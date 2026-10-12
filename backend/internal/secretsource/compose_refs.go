@@ -29,14 +29,20 @@ func ComposeServices(content string) ([]secretsourcetypes.ComposeService, error)
 	return result, nil
 }
 
-// AddComposeRefs adds environment references for secrets to compose content.
-// It only transforms the content; callers save it.
+// AddComposeRefs adds environment references for secrets to compose content
+// and, for EnvKeys, to .env content. It only transforms the content; callers
+// save it.
 func AddComposeRefs(req secretsourcetypes.ComposeRefsRequest) (secretsourcetypes.ComposeRefsResult, error) {
 	updated, added, skipped, err := setupplan.InjectEnvironmentRefs(req.Compose, req.Assignments)
 	if err != nil {
 		return secretsourcetypes.ComposeRefsResult{}, common.Classify(common.ErrValidation, err)
 	}
-	result := secretsourcetypes.ComposeRefsResult{Compose: updated, Added: added, Skipped: make([]secretsourcetypes.ComposeSkippedRef, 0, len(skipped))}
+	result := secretsourcetypes.ComposeRefsResult{Compose: updated, Added: added, Skipped: make([]secretsourcetypes.ComposeSkippedRef, 0, len(skipped)), EnvAdded: []string{}}
+	if len(req.EnvKeys) > 0 {
+		env, envAdded, envSkipped := setupplan.InjectEnvFileRefs(req.Env, req.EnvKeys)
+		result.Env, result.EnvAdded = env, envAdded
+		skipped = append(skipped, envSkipped...)
+	}
 	for _, ref := range skipped {
 		result.Skipped = append(result.Skipped, secretsourcetypes.ComposeSkippedRef{Service: ref.Service, Key: ref.Key, Reason: ref.Reason})
 	}

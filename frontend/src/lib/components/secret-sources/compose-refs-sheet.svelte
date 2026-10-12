@@ -13,18 +13,23 @@
 	import { tryCatch } from '#lib/utils/try-catch.js';
 
 	import ComposeRefsPicker from './compose-refs-picker.svelte';
-	import { selectionToAssignments } from './compose-refs.js';
+	import { selectionToAssignments, selectionToEnvKeys } from './compose-refs.js';
 
 	let {
 		open = $bindable(false),
 		compose,
 		keys,
+		env = null,
+		composeLocked = false,
 		onApply
 	}: {
 		open: boolean;
 		compose: string;
 		keys: string[];
-		// Receives the updated compose content; saving it is up to the caller.
+		// The project's .env content; null leaves .env out.
+		env?: string | null;
+		composeLocked?: boolean;
+		// Receives the updated content; saving it is up to the caller.
 		onApply: (result: ComposeRefsResult) => Promise<void> | void;
 	} = $props();
 
@@ -35,7 +40,10 @@
 	async function apply() {
 		applying = true;
 		error = null;
-		const response = await tryCatch(secretSourceService.addComposeRefs(compose, selectionToAssignments(selection)));
+		const envKeys = env === null ? [] : selectionToEnvKeys(selection);
+		const response = await tryCatch(
+			secretSourceService.addComposeRefs(compose, selectionToAssignments(selection), { content: env ?? '', keys: envKeys })
+		);
 		if (response.error) {
 			applying = false;
 			error = extractApiErrorMessage(response.error);
@@ -61,7 +69,7 @@
 >
 	{#snippet children()}
 		<div class="grid gap-4 py-6">
-			<ComposeRefsPicker {compose} {keys} {selection} />
+			<ComposeRefsPicker {compose} {keys} {selection} {env} {composeLocked} />
 			{#if error}
 				<Alert.Root variant="destructive-subtle" icon={AlertIcon} heading={m.compose_refs_failed()} description={error} />
 			{/if}

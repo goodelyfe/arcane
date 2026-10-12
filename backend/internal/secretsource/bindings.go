@@ -348,7 +348,7 @@ func (s *SecretSourceService) CheckBindings(ctx context.Context, project Project
 }
 
 // composeKeysInternal returns every variable the project's compose files
-// pass to a service or interpolate. ok is false when the files cannot be
+// pass to a service or interpolate, and every variable its .env references. ok is false when the files cannot be
 // read or parsed, so callers do not report every key as unused.
 func (s *SecretSourceService) composeKeysInternal(ctx context.Context, projectID string) (map[string]struct{}, bool) {
 	if s.projectFiles == nil {
@@ -371,6 +371,12 @@ func (s *SecretSourceService) composeKeysInternal(ctx context.Context, projectID
 				used[key] = struct{}{}
 			}
 		}
+	}
+	// A .env entry such as API_KEY=${API_KEY} passes the secret on to
+	// services that load the file, or to every service when Arcane injects
+	// .env variables.
+	for key := range setupplan.ReferencedKeys(files.EnvContent) {
+		used[key] = struct{}{}
 	}
 	return used, true
 }

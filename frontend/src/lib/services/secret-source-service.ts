@@ -65,8 +65,15 @@ class SecretSourceService extends BaseAPIService {
 		return this.handleResponse(this.api.post('/secret-sources/compose/services', { compose }));
 	}
 
-	async addComposeRefs(compose: string, assignments: Record<string, string[]>): Promise<ComposeRefsResult> {
-		return this.handleResponse(this.api.post('/secret-sources/compose/refs', { compose, assignments }));
+	// envKeys are added to env as KEY=${KEY}; leave them out to change compose only.
+	async addComposeRefs(
+		compose: string,
+		assignments: Record<string, string[]>,
+		env?: { content: string; keys: string[] }
+	): Promise<ComposeRefsResult> {
+		const body =
+			env && env.keys.length > 0 ? { compose, assignments, env: env.content, envKeys: env.keys } : { compose, assignments };
+		return this.handleResponse(this.api.post('/secret-sources/compose/refs', body));
 	}
 
 	async planSetup(environmentId: string, projectId: string, request: SetupPlanRequest): Promise<SetupPlan> {

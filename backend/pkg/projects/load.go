@@ -375,6 +375,13 @@ func LoadComposeProject(
 
 	// Override wins: maps.Copy(dst, src) copies src into dst.
 	maps.Copy(fullEnvMap, envOverride)
+	// It wins for .env injection too, so API_KEY=${API_KEY} in .env injects
+	// the override's value rather than the empty one .env resolved alone.
+	for key := range injectionVars {
+		if value, ok := envOverride[key]; ok {
+			injectionVars[key] = value
+		}
+	}
 
 	// Set PWD
 	if absWorkdir, absErr := filepath.Abs(workdir); absErr == nil {
