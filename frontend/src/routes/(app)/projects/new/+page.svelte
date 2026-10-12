@@ -606,8 +606,10 @@
 		<NewProjectSecretsSheet
 			bind:open={secretsSheetOpen}
 			compose={inputs.composeContent.value}
-			onApply={(compose, secrets) => {
+			env={inputs.envContent.value}
+			onApply={(compose, secrets, env) => {
 				form.setValue('composeContent', compose);
+				if (env !== undefined) form.setValue('envContent', env);
 				pendingSecrets = secrets;
 			}}
 		/>

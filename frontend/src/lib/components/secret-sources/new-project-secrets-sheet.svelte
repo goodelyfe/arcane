@@ -19,7 +19,7 @@
 
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
 	import ComposeRefsPicker from './compose-refs-picker.svelte';
-	import { type NewProjectSecrets, selectionToAssignments } from './compose-refs.js';
+	import { type NewProjectSecrets, selectionToAssignments, selectionToEnvKeys } from './compose-refs.js';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
 	import ProviderIcon from './provider-icon.svelte';
 	import ProviderTargetFields from './provider-target-fields.svelte';
@@ -28,13 +28,16 @@
 	let {
 		open = $bindable(false),
 		compose,
+		env = null,
 		onApply
 	}: {
 		open: boolean;
 		compose: string;
-		// Receives the compose content with references added and the binding to
-		// create once the project exists.
-		onApply: (compose: string, secrets: NewProjectSecrets) => void;
+		// The .env draft; null leaves .env out of the picker.
+		env?: string | null;
+		// Receives the compose and .env content with references added (env is
+		// undefined when unchanged) and the binding to create once the project exists.
+		onApply: (compose: string, secrets: NewProjectSecrets, env?: string) => void;
 	} = $props();
 
 	const sourcesQuery = createQuery(() => ({
@@ -95,21 +98,30 @@
 		applying = true;
 		error = null;
 		let updated = compose;
+		let updatedEnv: string | undefined;
 		if (selection.size > 0) {
-			const result = await tryCatch(secretSourceService.addComposeRefs(compose, selectionToAssignments(selection)));
+			const envKeys = env === null ? [] : selectionToEnvKeys(selection);
+			const result = await tryCatch(
+				secretSourceService.addComposeRefs(compose, selectionToAssignments(selection), { content: env ?? '', keys: envKeys })
+			);
 			if (result.error) {
 				applying = false;
 				error = extractApiErrorMessage(result.error);
 				return;
 			}
 			updated = result.data.compose;
+			if (result.data.envAdded.length > 0) updatedEnv = result.data.env;
 		}
 		applying = false;
-		onApply(updated, {
-			binding: { sourceId, target, required, enabled: true, autoRedeploy },
-			sourceName: sources.find((source) => source.id === sourceId)?.name ?? '',
-			keyCount: keys.length
-		});
+		onApply(
+			updated,
+			{
+				binding: { sourceId, target, required, enabled: true, autoRedeploy },
+				sourceName: sources.find((source) => source.id === sourceId)?.name ?? '',
+				keyCount: keys.length
+			},
+			updatedEnv
+		);
 		open = false;
 	}
 </script>
@@ -206,7 +218,7 @@
 
 					{#if keys !== null}
 						{#key pickerSession}
-							<ComposeRefsPicker {compose} {keys} {selection} />
+							<ComposeRefsPicker {compose} {keys} {selection} {env} />
 						{/key}
 					{/if}
 				{/if}

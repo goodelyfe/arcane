@@ -317,6 +317,9 @@ export interface ComposeRefsResult {
 	compose: string;
 	added: Record<string, string[]>;
 	skipped: ComposeSkippedRef[];
+	// Set only when env keys were sent.
+	env?: string;
+	envAdded: string[];
 }
 
 export interface TargetKeys {
