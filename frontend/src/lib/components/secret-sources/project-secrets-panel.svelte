@@ -45,6 +45,7 @@
 
 	import BitwardenTargetFields from './bitwarden-target-fields.svelte';
 	import ComposeRefsSheet from './compose-refs-sheet.svelte';
+	import type { SecretRefsEditor } from './compose-refs.js';
 	import InfisicalTargetFields from './infisical-target-fields.svelte';
 	import ProviderIcon from './provider-icon.svelte';
 	import ProviderTargetFields from './provider-target-fields.svelte';
@@ -61,11 +62,15 @@
 	let {
 		environmentId,
 		projectId,
-		projectName
+		projectName,
+		drafts = undefined
 	}: {
 		environmentId: string;
 		projectId: string;
 		projectName: string;
+		// The project page's open compose and .env drafts. With them, references go
+		// into the editor for review; without them, they are saved right away.
+		drafts?: SecretRefsEditor;
 	} = $props();
 
 	const queryClient = useQueryClient();
@@ -108,6 +113,11 @@
 
 	// Without a binding, setup offers every writable source; from a binding, only its own.
 	function openSetup(binding?: ProjectSecretBinding) {
+		// Setup rewrites .env on the server, which would collide with unsaved edits.
+		if (drafts?.dirty) {
+			toast.warning(m.secret_setup_save_first());
+			return;
+		}
 		setupChoices = binding ? setupSources.filter((source) => source.id === binding.sourceId) : setupSources;
 		setupSession += 1;
 		setupOpen = true;
@@ -118,43 +128,80 @@
 	let composeRefsSession = $state(0);
 	let composeRefsLoading = $state<string | null>(null);
 	let composeRefsCompose = $state('');
+	let composeRefsEnv = $state<string | null>(null);
+	let composeRefsLocked = $state(false);
 	let composeRefsKeys = $state<string[]>([]);
+	// Opened from a binding with picked keys; they are cleared once added.
+	let composeRefsBindingId = $state<string | null>(null);
+	// With drafts, at least one of compose and .env must be editable.
+	const composeRefsAllowed = $derived(!drafts || drafts.canEditCompose || drafts.canEditEnv);
 
-	// Opens the picker for keys, or for every key of a binding.
+	// Opens the picker for keys, or for every key of a binding. It works on the
+	// editor's drafts when there are drafts, so unsaved edits are kept.
 	async function openComposeRefs(keys?: string[], binding?: ProjectSecretBinding) {
 		composeRefsLoading = binding?.id ?? 'setup';
-		const projectResult = await tryCatch(projectService.getProjectForEnvironment(environmentId, projectId));
+		let compose = drafts?.compose ?? '';
+		let env: string | null = drafts?.canEditEnv ? drafts.env : null;
+		let loadError: unknown = null;
+		if (!drafts) {
+			const projectResult = await tryCatch(projectService.getProjectForEnvironment(environmentId, projectId));
+			loadError = projectResult.error;
+			compose = projectResult.data?.composeContent ?? '';
+			env = projectResult.data?.envContent ?? '';
+		}
 		let keyList = keys;
-		let keyError: unknown = null;
-		if (!keyList && binding) {
+		if (!loadError && !keyList && binding) {
 			const keysResult = await tryCatch(secretSourceService.targetKeys(binding.sourceId, binding.target));
 			keyList = keysResult.data?.keys;
-			keyError = keysResult.error;
+			loadError = keysResult.error;
 		}
 		composeRefsLoading = null;
-		if (projectResult.error || keyError || !keyList) {
-			toast.error(m.compose_refs_load_failed(), {
-				description: extractApiErrorMessage(projectResult.error ?? keyError)
-			});
+		if (loadError || !keyList) {
+			toast.error(m.compose_refs_load_failed(), { description: extractApiErrorMessage(loadError) });
 			return;
 		}
-		composeRefsCompose = projectResult.data.composeContent ?? '';
+		composeRefsCompose = compose;
+		composeRefsEnv = env;
+		composeRefsLocked = drafts ? !drafts.canEditCompose : false;
 		composeRefsKeys = keyList;
+		composeRefsBindingId = keys && binding ? binding.id : null;
 		composeRefsSession += 1;
 		composeRefsOpen = true;
 	}
 
 	async function saveComposeRefs(result: ComposeRefsResult) {
-		const added = Object.values(result.added).reduce((total, keys) => total + keys.length, 0);
+		const composeAdded = Object.values(result.added).reduce((total, keys) => total + keys.length, 0);
+		const envAdded = result.envAdded.length;
+		const added = composeAdded + envAdded;
 		if (added === 0) return;
-		const saved = await tryCatch(projectService.updateProject(projectId, undefined, result.compose));
+		const compose = composeAdded > 0 ? result.compose : undefined;
+		const env = envAdded > 0 ? result.env : undefined;
+		if (composeRefsBindingId) delete pickedKeys[composeRefsBindingId];
+		checkResult = null;
+		if (drafts) {
+			drafts.apply({ compose, env });
+			toast.success(m.compose_refs_in_editor({ count: added }));
+			return;
+		}
+		const saved = await tryCatch(projectService.updateProject(projectId, undefined, compose, env));
 		if (saved.error) {
 			toast.error(m.compose_refs_failed(), { description: extractApiErrorMessage(saved.error) });
 			return;
 		}
 		toast.success(m.compose_refs_saved({ count: added }));
-		checkResult = null;
 		await invalidateAll();
+	}
+
+	// ---- Picked keys ----
+	// Keys clicked in a binding's check results, by binding ID. Add to compose
+	// offers only these when any are picked.
+	let pickedKeys = $state<Record<string, string[]>>({});
+
+	function togglePicked(bindingId: string, key: string) {
+		const current = pickedKeys[bindingId] ?? [];
+		const next = current.includes(key) ? current.filter((candidate) => candidate !== key) : [...current, key];
+		if (next.length > 0) pickedKeys[bindingId] = next;
+		else delete pickedKeys[bindingId];
 	}
 
 	// ---- Editor state ----
@@ -409,6 +456,8 @@
 			onDone={async () => {
 				checkResult = null;
 				await invalidateBindings();
+				// Setup edits .env on the server; show the new files in the editor.
+				await drafts?.reload();
 			}}
 			onAddToCompose={(keys) => {
 				setupOpen = false;
@@ -420,7 +469,14 @@
 
 {#if composeRefsSession > 0}
 	{#key composeRefsSession}
-		<ComposeRefsSheet bind:open={composeRefsOpen} compose={composeRefsCompose} keys={composeRefsKeys} onApply={saveComposeRefs} />
+		<ComposeRefsSheet
+			bind:open={composeRefsOpen}
+			compose={composeRefsCompose}
+			env={composeRefsEnv}
+			composeLocked={composeRefsLocked}
+			keys={composeRefsKeys}
+			onApply={saveComposeRefs}
+		/>
 	{/key}
 {/if}
 
@@ -481,7 +537,10 @@
 		<Alert.Root
 			variant="primary-subtle"
 			icon={LockIcon}
-			description={m.project_secrets_usage_hint({ example: 'environment: [DB_PASSWORD]' })}
+			description={m.project_secrets_usage_hint({
+				example: 'environment: [DB_PASSWORD]',
+				envExample: 'DB_PASSWORD=${DB_PASSWORD}'
+			})}
 		/>
 	</div>
 {/snippet}
@@ -557,15 +616,16 @@
 					/>
 				{/if}
 				{#if canEdit}
+					{@const picked = pickedKeys[current.id] ?? []}
 					<ArcaneButton
 						action="base"
-						tone="outline"
+						tone={picked.length > 0 ? 'outline-primary' : 'outline'}
 						size="sm"
 						icon={VariableIcon}
-						customLabel={m.compose_refs_open()}
+						customLabel={picked.length > 0 ? m.compose_refs_open_picked({ count: picked.length }) : m.compose_refs_open()}
 						loading={composeRefsLoading === current.id}
-						disabled={composeRefsLoading !== null}
-						onclick={() => void openComposeRefs(undefined, current)}
+						disabled={composeRefsLoading !== null || !composeRefsAllowed}
+						onclick={() => void openComposeRefs(picked.length > 0 ? [...picked].sort() : undefined, current)}
 					/>
 					<ArcaneButton action="edit" tone="outline" size="sm" onclick={() => startEditing(current)} disabled={!canListSources} />
 				{/if}
@@ -607,6 +667,23 @@
 	{@const overridden = new Set(result.overriddenKeys)}
 	{@const shadowed = new Set(result.shadowedKeys)}
 	{@const unused = new Set(result.unusedKeys)}
+	{#snippet keyBadge(key: string, isPicked: boolean)}
+		<Badge
+			variant={isPicked
+				? 'blue'
+				: shadowed.has(key)
+					? 'gray'
+					: unused.has(key)
+						? 'secondary'
+						: overridden.has(key)
+							? 'amber'
+							: 'outline'}
+			size="sm"
+			mono
+		>
+			{#if isPicked}<CheckIcon class="size-3" />{/if}{key}
+		</Badge>
+	{/snippet}
 	<div class="space-y-3 border-t border-border/50 pt-3">
 		<div class="flex flex-wrap items-center gap-2">
 			{#if result.neverDeployed}
@@ -625,22 +702,32 @@
 		</div>
 
 		{#if result.keys.length > 0}
+			{@const picked = pickedKeys[current.id] ?? []}
+			{#if canEdit}
+				<p class="text-xs text-muted-foreground">{m.project_secrets_pick_hint()}</p>
+			{/if}
 			<div class="flex flex-wrap gap-1.5">
 				{#each result.keys as key (key)}
-					<Badge
-						variant={shadowed.has(key) ? 'gray' : unused.has(key) ? 'secondary' : overridden.has(key) ? 'amber' : 'outline'}
-						size="sm"
-						mono
-						title={shadowed.has(key)
-							? m.project_secrets_key_shadowed()
-							: unused.has(key)
-								? m.project_secrets_key_unused()
-								: overridden.has(key)
-									? m.project_secrets_overrides()
-									: undefined}
-					>
-						{key}
-					</Badge>
+					{@const status = shadowed.has(key)
+						? m.project_secrets_key_shadowed()
+						: unused.has(key)
+							? m.project_secrets_key_unused()
+							: overridden.has(key)
+								? m.project_secrets_overrides()
+								: undefined}
+					{#if canEdit}
+						<button
+							type="button"
+							class="rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+							aria-pressed={picked.includes(key)}
+							title={status}
+							onclick={() => togglePicked(current.id, key)}
+						>
+							{@render keyBadge(key, picked.includes(key))}
+						</button>
+					{:else}
+						<span title={status}>{@render keyBadge(key, false)}</span>
+					{/if}
 				{/each}
 			</div>
 		{:else}

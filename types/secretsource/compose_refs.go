@@ -23,6 +23,10 @@ type ComposeRefsRequest struct {
 	Compose string `json:"compose"`
 	// Assignments maps a service name to the keys to add to it.
 	Assignments map[string][]string `json:"assignments"`
+	// Env is the project's .env content; EnvKeys are added to it as
+	// KEY=${KEY} references.
+	Env     string   `json:"env,omitempty"`
+	EnvKeys []string `json:"envKeys,omitempty"`
 }
 
 // ComposeSkippedRef is a key that was not added to a service.
@@ -36,6 +40,9 @@ type ComposeRefsResult struct {
 	Compose string              `json:"compose"`
 	Added   map[string][]string `json:"added"`
 	Skipped []ComposeSkippedRef `json:"skipped"`
+	// Env is the updated .env content; it is set only when EnvKeys were sent.
+	Env      string   `json:"env,omitempty"`
+	EnvAdded []string `json:"envAdded"`
 }
 
 type TargetKeysRequest struct {

@@ -240,6 +240,20 @@ func TestAddComposeRefsWrapsInjector(t *testing.T) {
 	assert.Equal(t, "services:\n  app:\n    environment:\n      API_TOKEN: ${API_TOKEN}\n    image: x\n", result.Compose)
 	assert.Equal(t, map[string][]string{"app": {"API_TOKEN"}}, result.Added)
 	require.Len(t, result.Skipped, 1)
+	assert.Empty(t, result.Env)
+	assert.Empty(t, result.EnvAdded)
+
+	result, err = AddComposeRefs(secretsourcetypes.ComposeRefsRequest{
+		Compose: "services:\n  app:\n    image: x\n",
+		Env:     "TZ=UTC\n",
+		EnvKeys: []string{"API_TOKEN", "TZ"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "services:\n  app:\n    image: x\n", result.Compose)
+	assert.Equal(t, []string{"API_TOKEN"}, result.EnvAdded)
+	assert.Contains(t, result.Env, "\nAPI_TOKEN=${API_TOKEN}\n")
+	require.Len(t, result.Skipped, 1)
+	assert.Equal(t, ".env", result.Skipped[0].Service)
 
 	_, err = AddComposeRefs(secretsourcetypes.ComposeRefsRequest{Compose: "services: ["})
 	require.Error(t, err)
