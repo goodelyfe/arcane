@@ -159,9 +159,10 @@ var ServiceOptions = fx.Options(
 			localSettings *settings.SettingsService,
 			projectService *project.ProjectService,
 			localKv *kv.KVService,
+			podmanService *podman.Service,
 			secretSources *secretsource.SecretSourceService,
 		) *container.ContainerService {
-			service := container.NewContainerService(localEvent, localDocker, localImage, localSettings, projectService, localKv)
+			service := container.NewContainerService(localEvent, localDocker, localImage, localSettings, projectService, localKv, podmanService)
 			service.SetSecretFiller(secretSources)
 			return service
 		},
